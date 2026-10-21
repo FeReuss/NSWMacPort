@@ -1,6 +1,7 @@
 # BOTW port: development notes and handoff
 
-State on 2026-10-21. Run the tests with `.venv/bin/python -m unittest discover -s tests`. The measured performance
+State on 2026-10-21. Run the tests with `.venv/bin/python -m unittest discover -s tests` (create the environment first:
+`python3.14 -m venv .venv && .venv/bin/pip install -r games/totk/requirements.txt`). The measured performance
 work is summarized in [PERFORMANCE.md](PERFORMANCE.md); the player-facing notes are in [README.md](README.md).
 
 ## Done and verified
