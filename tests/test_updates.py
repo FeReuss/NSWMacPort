@@ -13,13 +13,13 @@ from unittest.mock import patch
 from test_game_containers import (HEADER, AREA, TITLEKEK, CONTENT, SCRIPTS, TITLE,
                                   encrypt, nca, partition, ticket, game_image, romfs)
 from cryptography.hazmat.primitives.ciphers import modes
-from extract_exefs import decrypt, common_tickets, container_entries
+from extract_exefs import decrypt, common_tickets, container_entries, extract_exefs
 from extract_update_romfs import hactool_prod_keys, merge
 import build_app
 
 
-def update_nca(managed=True):
-    data = nca(managed)
+def update_nca(managed=True, title=TITLE):
+    data = nca(managed, title=title)
     header = bytearray(b''.join(decrypt(HEADER, modes.XTS(i.to_bytes(16, 'big')),
                                      data[i*512:(i+1)*512]) for i in range(6)))
     header[0x604] = 4  # BKTR marker in section 1; these tests extract only ExeFS.
@@ -60,6 +60,41 @@ class Updates(unittest.TestCase):
                                  '--keys', self.keys, '--output', self.root/'bad'], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Expected a BKTR update', result.stderr)
+
+    def test_botw_update_requires_explicit_title_and_rejects_mixed_metadata(self):
+        title = 0x01007EF00011E000
+        update = self.root / 'botw-update.nsp'
+        files = [('program.nca', update_nca(False, title)),
+                 ('meta.nca', nca(title=title + 0x800, content=1))]
+        update.write_bytes(partition(files))
+        out = self.root / 'botw/exefs'
+        manifest = extract_exefs(update, self.keys, out, title_id=f'{title:016X}', update=True)
+        self.assertEqual(manifest['program']['title_id'], f'{title:016X}')
+        with self.assertRaisesRegex(ValueError, 'another game'):
+            extract_exefs(update, self.keys, self.root / 'default/exefs', update=True)
+        files.append(('foreign.nca', nca(content=2)))
+        update.write_bytes(partition(files))
+        with self.assertRaisesRegex(ValueError, 'Mixed-title'):
+            extract_exefs(update, self.keys, self.root / 'mixed/exefs', title_id=f'{title:016X}', update=True)
+
+    def test_merge_accepts_botw_only_with_explicit_expected_title(self):
+        title = 0x01007EF00011E000
+        base = self.root / 'botw-base.nsp'
+        base.write_bytes(game_image('nsp', title=title))
+        update = self.root / 'botw-update.nsp'
+        update.write_bytes(partition([('program.nca', update_nca(False, title))]))
+        helper = self.root / 'hactool'
+        helper.write_text('#!' + sys.executable + '\nimport pathlib,sys\n'
+                          'out=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--section")))\n'
+                          f'out.write_bytes({romfs()!r})\n'
+                          'for i in range(6): print(f"Level {i} (GOOD)")\n')
+        helper.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'Expected Tears of the Kingdom'):
+            merge(base, update, self.keys, helper, self.root / 'default')
+        with patch('extract_update_romfs.shutil.disk_usage') as space:
+            space.return_value.free = 100 * 2**30
+            merge(base, update, self.keys, helper, self.root / 'botw-romfs', title_id=f'{title:016X}')
+        self.assertEqual((self.root / 'botw-romfs/romfs.bin').read_bytes(), romfs())
 
     def test_wrong_version_stops_before_rewrite(self):
         tree = self.root/'tree'; tree.mkdir()
@@ -282,7 +317,9 @@ class Updates(unittest.TestCase):
         def fake_clone(_source, target):
             target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'new app')
         checks=[]
-        def processes(*_args,**_kwargs):
+        def processes(*args,**_kwargs):
+            if args[0][0]=='cp':   # copy_tree's recursive clone of the seed, not a process listing
+                return SimpleNamespace(returncode=0)
             self.assertEqual(old.read_bytes(),b'old running app')
             checks.append(True)
             return SimpleNamespace(stdout=str(old.resolve())+'\n' if len(checks)==1 else '')

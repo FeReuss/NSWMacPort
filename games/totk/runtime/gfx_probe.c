@@ -90,6 +90,20 @@ void runtime_gfx_probe(int negative){
  probe_texture_plan();
  lookup=runtime_gfx_override("nvnBootstrapLoader");if(!lookup)runtime_fail("bootstrap override");
  if(negative){((uint64_t(*)(const void *))fn("nvnCommandBufferDrawTexture"))(NULL);runtime_fail("unimplemented NVN returned");}
+ NVNdeviceBuilder db; NVNdevice device;
+ extern int totk_depth_near_minus_w(void);
+ CALL(nvnDeviceBuilderSetDefaults,&db);
+ CALL(nvnDeviceInitialize,&device,&db);
+ if(CALL(nvnDeviceGetDepthMode,&device)!=NVN_DEPTH_MODE_NEAR_IS_MINUS_W||!totk_depth_near_minus_w())runtime_fail("default NVN depth mode");
+ CALL(nvnDeviceSetDepthMode,&device,NVN_DEPTH_MODE_NEAR_IS_ZERO);
+ if(CALL(nvnDeviceGetDepthMode,&device)!=NVN_DEPTH_MODE_NEAR_IS_ZERO||totk_depth_near_minus_w())runtime_fail("zero-to-one NVN depth mode");
+ CALL(nvnDeviceSetDepthMode,&device,NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
+ if(!totk_depth_near_minus_w())runtime_fail("minus-w NVN depth mode");
+ CALL(nvnDeviceSetDepthMode,&device,NVN_DEPTH_MODE_NEAR_IS_ZERO);
+ CALL(nvnDeviceFinalize,&device); CALL(nvnDeviceInitialize,&device,&db);
+ if(!totk_depth_near_minus_w())runtime_fail("reinitialized NVN depth mode");
+ CALL(nvnDeviceFinalize,&device);
+ extern void totk_rt_probe_depth(void); totk_rt_probe_depth();
  struct{alignas(16) NVNtexture value;unsigned char guard[64];} texture;
  NVNtextureBuilder builder;memset(&builder,0,sizeof(builder));memset(&texture,0xa5,sizeof(texture));
  CALL(nvnTextureBuilderSetDefaults,&builder);CALL(nvnTextureBuilderSetSize2D,&builder,1920,1080);CALL(nvnTextureBuilderSetFormat,&builder,NVN_FORMAT_RGBA8);

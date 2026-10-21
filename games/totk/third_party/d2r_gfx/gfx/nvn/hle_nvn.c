@@ -134,11 +134,14 @@ static void x_drain(void);
 static int async_replay(void);
 static int call_stats_on(void);
 static void call_stats_end(const void *cb, const uint8_t *copy);
+static _Atomic int g_depth_near_minus_w = 1;
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
 NVN(nvnDeviceBuilderSetFlags, void, NVNdeviceBuilder *b, int f) { ((dev_builder_t *)b)->flags = f; }
 NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
+    o->depth_mode = NVN_DEPTH_MODE_NEAR_IS_MINUS_W;
+    atomic_store(&g_depth_near_minus_w, 1); /* NVN defaults to -w..w, including games that never call SetDepthMode. */
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
     return 1;
 }
@@ -197,9 +200,9 @@ NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACK
     dev_t_ *o = (dev_t_ *)d; o->dbg_cb = B(enable) ? (void *)cb : NULL; o->dbg_data = data;
 }
 NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; LOG("[nvn] 窗口原点 %s", m ? "左上（同 D3D / Metal）" : "左下（GL）"); }
-static _Atomic int g_depth_near_minus_w;
 int totk_depth_near_minus_w(void) { return atomic_load(&g_depth_near_minus_w); }
 NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; atomic_store(&g_depth_near_minus_w, m == NVN_DEPTH_MODE_NEAR_IS_MINUS_W); LOG("[nvn] 深度模式 %s", m ? "近=0（同 D3D / Metal）" : "近=-w（GL）：顶点着色器翻译时做 z=(z+w)/2 转换"); }
+NVN(nvnDeviceGetDepthMode, NVNdepthMode, const NVNdevice *d) { return ((const dev_t_ *)d)->depth_mode; }
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; }
 
 // ---------- 内存池 ----------
@@ -759,7 +762,12 @@ typedef struct { uintptr_t ctl_lo, ctl_hi; uint8_t *copy; uint64_t stale_at; uin
 static uint64_t g_submits;
 /* Recently freed handles, to report what a later use of a freed handle looked like. */
 #define FREED_RING 65536
-static struct { uintptr_t h; uint64_t freed_at, stale_at, used_at, made_at; uintptr_t lo; } g_freed[FREED_RING]; static unsigned g_nfreed;
+typedef struct { uintptr_t h; uint64_t freed_at, stale_at, used_at, made_at; uintptr_t lo; } freed_rec;
+static freed_rec g_freed[FREED_RING]; static unsigned g_nfreed;
+/* Copies released because their mark was gone are rarer (~30 per minute against ~2,000 per second at a load): their own ring,
+   so the busy one cannot overwrite them before a later use is reported. */
+#define FREED_TOKEN_RING 4096
+static freed_rec g_freed_token[FREED_TOKEN_RING]; static unsigned g_nfreed_token;
 static size_t g_ncopies;
 /* TOTK: copies indexed by the 4 KiB page of their control-memory position (a copy covers one byte, ctl_lo). Releasing a
    re-added control region looks at its pages only: it used to scan all ~30,000 live copies under one lock on every
@@ -812,17 +820,31 @@ static uint8_t *flatten_recording(const uint8_t *p) {
         p += h.size;
     }
 }
-/* Track handle use for diagnostics; lifetime depends on control-memory reuse, never elapsed frames. */
-static void copy_touch(NVNcommandHandle h, uint64_t now) {
+/* Track handle use for diagnostics; lifetime depends on control-memory reuse, never elapsed frames. 0: not a live recording.
+   TOTK stops there. BOTW logs it and its callers skip that handle: one load into the world in ~20 test sessions ended here
+   (2026-10-21, r-off-1); a skipped command list costs part of a frame's draws, stopping costs the game. */
+static int copy_touch(NVNcommandHandle h, uint64_t now) {
     copy_prefix *c = copy_of(h);
     if (c->magic != COPY_MAGIC) {
-        for (unsigned i = 0; i < FREED_RING && i < g_nfreed; i++) if (g_freed[i].h == (uintptr_t)h)
-            LOG("【红】handle %#llx made at submit %llu was freed at submit %llu (memory start %#lx re-added at submit %llu, last use at submit %llu); now submit %llu",
-                (unsigned long long)h, (unsigned long long)g_freed[i].made_at, (unsigned long long)g_freed[i].freed_at, (unsigned long)g_freed[i].lo,
-                (unsigned long long)g_freed[i].stale_at, (unsigned long long)g_freed[i].used_at, (unsigned long long)now);
+        static const struct { freed_rec *ring; unsigned size; const unsigned *n; const char *why; } rings[] = {
+            {g_freed, FREED_RING, &g_nfreed, "its control memory was added again"},
+            {g_freed_token, FREED_TOKEN_RING, &g_nfreed_token, "its mark in the control memory was gone"}};
+        for (unsigned r = 0; r < 2; r++)
+            for (unsigned i = 0; i < rings[r].size && i < *rings[r].n; i++) if (rings[r].ring[i].h == (uintptr_t)h) {
+                const freed_rec *f = &rings[r].ring[i];
+                LOG("【红】handle %#llx made at submit %llu was freed at submit %llu because %s (memory start %#lx, stale at submit %llu, last use at submit %llu); now submit %llu",
+                    (unsigned long long)h, (unsigned long long)f->made_at, (unsigned long long)f->freed_at, rings[r].why, (unsigned long)f->lo,
+                    (unsigned long long)f->stale_at, (unsigned long long)f->used_at, (unsigned long long)now);
+            }
+#ifdef NSW_GAME_BOTW
+        static _Atomic uint64_t skipped;
+        if (atomic_fetch_add(&skipped, 1) < 50) LOG("【红】command handle %#llx is not a live recording (freed or never recorded): skipped", (unsigned long long)h);
+        return 0;
+#else
         die("command handle %#llx is not a live recording (freed or never recorded)", (unsigned long long)h);
+#endif
     }
-    c->used_at = now;
+    c->used_at = now; return 1;
 }
 
 static uint64_t g_copy_drop_readd, g_copy_drop_token, g_copy_mark_faults;   /* why copies were released: their control memory was added again / their mark there is gone (of those: unmapped) */
@@ -831,7 +853,8 @@ static void copy_drop(copy_bucket *b, uint32_t i, int by_token) {   /* g_copy_mu
     c->stale_at = g_submits + 1;
     copy_prefix *pf = (copy_prefix *)(c->copy - sizeof(copy_prefix));
     if (cmdlog_env()) LOG("[cmd] free copy=%p%s", (void *)c->copy, by_token ? " (its mark in the control memory is gone)" : "");
-    g_freed[g_nfreed++ % FREED_RING] = (typeof(g_freed[0])){(uintptr_t)c->copy, g_submits, c->stale_at, pf->used_at, pf->made_at, c->ctl_lo};
+    freed_rec rec = {(uintptr_t)c->copy, g_submits, c->stale_at, pf->used_at, pf->made_at, c->ctl_lo};
+    if (by_token) g_freed_token[g_nfreed_token++ % FREED_TOKEN_RING] = rec; else g_freed[g_nfreed++ % FREED_RING] = rec;
     pf->magic = 0; g_copy_bytes -= malloc_size(pf); free(pf); b->v[i] = b->v[--b->n]; g_ncopies--;
     if (by_token) g_copy_drop_token++; else g_copy_drop_readd++;
     if (!b->n && !b->empty) { b->empty = 1; g_cbk_empty++; }
@@ -863,7 +886,12 @@ static int async_replay(void);   /* below: TOTK_ASYNC_REPLAY */
 /* With the translation thread (TOTK_ASYNC_REPLAY=1, iPhone default) the game may reuse a submitted command buffer's control
    memory as soon as the submit call returns, before the queued replay used the copy: marks are not used there yet (a copy
    last submitted at or after the submission being replayed would have to be kept). */
-static int copy_token_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_COPY_TOKEN"); v = !(e && !strcmp(e, "0")) && !async_replay();
+#ifdef NSW_GAME_BOTW
+#define COPY_TOKEN_ASYNC 1   /* BOTW: marks with the translation thread too, released only once replayed (copy_token_releasable) */
+#else
+#define COPY_TOKEN_ASYNC 0
+#endif
+static int copy_token_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_COPY_TOKEN"); v = !(e && !strcmp(e, "0")) && (COPY_TOKEN_ASYNC || !async_replay());
     if (!v) LOG("[cmd] 录制副本记号：关（%s）：副本只在控制内存被重新加入时释放", e && !strcmp(e, "0") ? "TOTK_COPY_TOKEN=0" : "翻译线程模式还不支持"); } return v; }
 static void copy_token_write(uintptr_t at, const uint8_t *copy) { uint64_t v[2] = {COPY_TOKEN_MAGIC, (uint64_t)(uintptr_t)copy}; memcpy((void *)at, v, sizeof v); }
 static int copy_token_negative(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_PROBE_NEGATIVE"); v = e && atoi(e) == 22; } return v; }   /* probe negative 22: marks never checked */
@@ -872,6 +900,16 @@ static int copy_token_negative(void) { static int v = -1; if (v < 0) { const cha
    of it that does not restore the mask leaves them blocked for good: the thread's next fault (a dirty-page write) then
    faults forever at 100 % CPU (2026-10-17 analysis/long20, first version with sigsetjmp(…, 0) per read: hung while loading). */
 static sigjmp_buf *g_mark_jb;   /* only the replay thread walks copies (g_copy_mu held) */
+/* With the translation thread a copy whose mark is gone may still be named by a submission queued after the one being
+   replayed (the game reuses the memory once the submit call returns): it goes only if its last submit (used_at, set at the
+   submit call) came before the submission now being replayed. Without a last use (only inlined) it may go. TOTK (2026-10-21):
+   without marks, live copies grew 40,000 -> 69,000 in 13 minutes of BOTW with the translation thread; with them, flat. */
+static _Atomic uint64_t g_replay_at;   /* x_thread: the submit number of the submission being replayed */
+static int copy_token_releasable(const cmd_copy *c) {
+    if (!async_replay()) return 1;
+    const copy_prefix *pf = (const copy_prefix *)(c->copy - sizeof(copy_prefix));
+    return atomic_load(&pf->used_at) < atomic_load(&g_replay_at);
+}
 static int copy_token_intact(const cmd_copy *c) {
     if (copy_token_negative()) return 1;
     uint64_t v[2];
@@ -978,7 +1016,7 @@ void dm_nvn_inline_bulk_set(int v) {
 static void inline_recording(NVNcommandBuffer *c, NVNcommandHandle hd) {
     const uint8_t *p = (const uint8_t *)(uintptr_t)hd;
     if (!p) die("CallCommands/CopyCommands with a null handle");
-    copy_touch(hd, g_submits);
+    if (!copy_touch(hd, g_submits)) return;   // BOTW: a freed recording is skipped, not inlined
     if (call_stats_on()) call_stats_note(c, hd, p);
     /* EndRecording already flattened and checked this contiguous body. Copy
        its bytes now, at exactly the original call position. Deferred bindings
@@ -1154,12 +1192,13 @@ static void pin_scan(size_t buckets) {   /* g_copy_mu and g_pin_mu held */
     size_t end = g_pin_scan_pos + buckets < g_pin_scan_cap ? g_pin_scan_pos + buckets : g_pin_scan_cap;
     volatile size_t k = g_pin_scan_pos; volatile uint32_t i = 0;
     sigjmp_buf jb;
-    if (sigsetjmp(jb, 1)) { runtime_fault_guard = NULL; copy_drop(&g_cbk[k], i, 1); g_copy_mark_faults++; }   /* reading copy (k, i)'s mark faulted: its control memory is unmapped */
+    if (sigsetjmp(jb, 1)) { runtime_fault_guard = NULL;   /* reading copy (k, i)'s mark faulted: its control memory is unmapped */
+        if (copy_token_releasable(&g_cbk[k].v[i])) { copy_drop(&g_cbk[k], i, 1); g_copy_mark_faults++; } else i++; }
     g_mark_jb = &jb;
     for (; k < end; k++, i = 0) {
         copy_bucket *b = &g_cbk[k]; if (!b->used) continue;
         while (i < b->n) {
-            if (b->v[i].token && !copy_token_intact(&b->v[i])) { copy_drop(b, i, 1); continue; }   /* its control memory was reused: the copy goes */
+            if (b->v[i].token && !copy_token_intact(&b->v[i]) && copy_token_releasable(&b->v[i])) { copy_drop(b, i, 1); continue; }   /* its control memory was reused: the copy goes */
             pin_mark_ops(b->v[i].copy); g_pin_scanned++; i++;
         }
     }
@@ -1315,7 +1354,7 @@ void dm_nvn_probe_commands(void) {
     NVNcommandHandle hc = h_nvnCommandBufferEndRecording(&caller);
     h_nvnCommandBufferAddControlMemory(&b, control[0], sizeof control[0]);
     if (g_ncopies != before + 2) die("command probe: control reuse retired wrong recordings");
-    copy_touch(hb, g_submits); copy_touch(hc, g_submits);
+    if (!copy_touch(hb, g_submits) || !copy_touch(hc, g_submits)) die("command probe: kept recordings are not live");
     const uint8_t *p = (const uint8_t *)(uintptr_t)hc;
     const p_scissor expected[] = {{11,22,33,44}, {55,66,77,88}};
     unsigned n = 0;
@@ -1362,7 +1401,7 @@ void dm_nvn_probe_copy_marks(void) {
     if (g_ncopies == before + 4) die("copy mark probe: a recording copy whose control memory was reused was not released");
     if (g_ncopies != before + 2 || g_copy_drop_token != by_mark0 + 2)
         die("copy mark probe: %zu of 4 copies left (expected 2: the intact mark and the one without a mark)", g_ncopies - before);
-    copy_touch(h[1], g_submits); copy_touch(h[2], g_submits);   /* the two kept ones are still live recordings */
+    if (!copy_touch(h[1], g_submits) || !copy_touch(h[2], g_submits)) die("copy mark probe: the two kept recordings are not live");
     munmap(gone, pg);
     h_nvnCommandBufferAddControlMemory(&b, ctl[1], sizeof ctl[1]); h_nvnCommandBufferAddControlMemory(&c, ctl[2], 48);
     for (int i = 0; i < 4; i++) h_nvnCommandBufferFinalize(all[i]);
@@ -1874,9 +1913,9 @@ _Atomic int dm_submit_busy;   // TOTK diagnostic: submissions being replayed (ru
 //    job of that image's last present, then for its present ticket as before. The replay frame number travels in the job.
 //  - Operations that destroy or read Metal state (pool / texture / program finalize, ReadTexels / WriteTexels, QueueFinish,
 //    suspend) wait until the queue is empty first (x_drain), so they never overtake a queued replay that still uses them.
-// TOTK_ASYNC_REPLAY=0 (default for now) runs everything on the calling thread as before.
+// TOTK_ASYNC_REPLAY=0 (TOTK's default on the Mac; BOTW's is on, see async_replay) runs everything on the calling thread as before.
 enum { XJ_SUBMIT = 1, XJ_PRESENT, XJ_TEXREL };
-typedef struct { int kind, n; uint64_t *h; void *ucap; win_t *win; int idx; double period; int crop[4]; uint64_t frame, sub; tex_t tex; } xjob;   // tex: copy of a finalized texture (XJ_TEXREL); ucap: uniforms captured at the submit call
+typedef struct { int kind, n; uint64_t *h; void *ucap; win_t *win; int idx; double period; int crop[4]; uint64_t frame, sub, at; tex_t tex; } xjob;   // at: the submit number (copy_touch)   // tex: copy of a finalized texture (XJ_TEXREL); ucap: uniforms captured at the submit call
 #define XQ 64
 #define XF 4096
 static xjob g_xq[XQ];
@@ -1887,7 +1926,14 @@ static win_t *g_xp_win; static uint64_t g_xp_job[4];   // job number of each swa
 static _Atomic uint64_t g_x_drains, g_x_drain_ns;
 static int async_replay(void) {
     static int v = -1;
+    /* BOTW: on by default (TOTK_ASYNC_REPLAY=0 turns it off). Scripted A/B on the timeslice build, same seeds (2026-10-21):
+       p90 19.9-21.7 -> 16.8 ms, p99 ~24 -> ~19 ms; 18 minutes with copy marks (COPY_TOKEN_ASYNC): no dead handle, live copies
+       flattening near 63,000. TOTK keeps it off on the Mac. */
+#ifdef NSW_GAME_BOTW
+    if (v < 0) { const char *e = getenv("TOTK_ASYNC_REPLAY"); v = !e || atoi(e) > 0; if (v) LOG("[nvn] 翻译线程：提交与出图排队交给独立线程回放（TOTK_ASYNC_REPLAY=0 关）"); }
+#else
     if (v < 0) { const char *e = getenv("TOTK_ASYNC_REPLAY"); v = e && atoi(e) > 0; if (v) LOG("[nvn] 翻译线程：提交与出图排队交给独立线程回放（TOTK_ASYNC_REPLAY=0 关）"); }
+#endif
     return v;
 }
 static void submit_exec(int n, const uint64_t *h, void *ucap);
@@ -1899,7 +1945,7 @@ static void *x_thread(void *unused) {
         while (g_xq_done == g_xq_in) pthread_cond_wait(&g_xq_cv, &g_xq_mu);
         xjob j = g_xq[g_xq_done % XQ];
         pthread_mutex_unlock(&g_xq_mu);
-        if (j.kind == XJ_SUBMIT) { submit_exec(j.n, j.h, j.ucap); free(j.h); }
+        if (j.kind == XJ_SUBMIT) { atomic_store(&g_replay_at, j.at); submit_exec(j.n, j.h, j.ucap); free(j.h); }
         else if (j.kind == XJ_TEXREL) { void live_del_x(const tex_t *o); live_del_x(&j.tex); mtl_tex_release(&j.tex); }
         else {
             // Real-time like the game's render thread that used to replay (set at acquire): otherwise the game's ~50
@@ -1975,7 +2021,11 @@ static int fence_wait(uint64_t k, uint64_t timeout_ns) {
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     NVN_BLOCKING();
     totk_tl(TL_SUB_IN, (uint64_t)n, 0);
-    { uint64_t now = __atomic_add_fetch(&g_submits, 1, __ATOMIC_RELAXED); for (int i = 0; i < n; i++) copy_touch(h[i], now); }
+    NVNcommandHandle live[n > 0 ? n : 1];   // BOTW: the submission without a handle that is not a live recording
+    uint64_t sub_at = __atomic_add_fetch(&g_submits, 1, __ATOMIC_RELAXED);
+    { int k = 0;
+      for (int i = 0; i < n; i++) if (copy_touch(h[i], sub_at)) live[k++] = h[i];
+      if (k != n) { h = live; n = k; } }
     if (totk_life_on()) { int k = 0; for (int i = 0; i < n; i++) k += totk_life_handle_has(h[i]); totk_life_log("submit n=%d followed=%d", n, k); }
     ((queue_t *)q)->submits++;
     /* TOTK: what the console reads at the submit call is read here, on the game thread, before the submission may be handed
@@ -1990,7 +2040,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
         if (((queue_t *)q)->submits % 600 == 0) LOG("[nvn] 延迟绑定 至提交 %llu：提交时读句柄 %llu 次，其中与录制时不同 %llu 次；每次提交读句柄平均 %.3f ms", (unsigned long long)((queue_t *)q)->submits, (unsigned long long)g_def_n, (unsigned long long)g_def_changed, g_def_ns / 1e6 / (double)((queue_t *)q)->submits);
     }
     if (async_replay()) {
-        xjob j = {.kind = XJ_SUBMIT, .n = n, .h = malloc(sizeof(uint64_t) * (n > 0 ? n : 1))};
+        xjob j = {.kind = XJ_SUBMIT, .n = n, .h = malloc(sizeof(uint64_t) * (n > 0 ? n : 1)), .at = sub_at};
         if (!j.h) die("submit job");
         memcpy(j.h, h, sizeof(uint64_t) * (size_t)n);
         j.ucap = mtl_sub_capture_ubos((const uint64_t *)h, n);
@@ -2168,6 +2218,7 @@ static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static unsigned present_ticks(const win_t *o);
 extern void runtime_frame_step_update(uint64_t now_ns) __attribute__((weak_import));
+extern void runtime_core_wait_take(uint64_t *sum_ns, uint64_t *max_ns, uint64_t *forced) __attribute__((weak_import));   // runtime/threads.c
 extern void movie_host_tick(void) __attribute__((weak_import));   /* TOTK runtime/movie_host.c: pre-rendered cutscenes at their own frame rate */
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // 宿主 hle_thread.c 提供真值；图形单测里为 0 | The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
@@ -2634,6 +2685,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         // 慢帧归因（只在开 DM_NVN_TSV 时取）：本帧出图线程 CPU 时间（换线程记 −1）、进程全部线程 CPU、取图等待按帧累计、出图调用时刻（与 GPU / 上屏时刻同基：进程起点 ms）
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
+        if (runtime_core_wait_take) { uint64_t cw, cm, cf; runtime_core_wait_take(&cw, &cm, &cf);
+            trow(f, "@core_wait_ms", cw / 1e6); trow(f, "@core_wait_max_ms", cm / 1e6); trow(f, "@core_preempted", (double)cf); }
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
             uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();

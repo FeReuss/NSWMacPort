@@ -35,6 +35,12 @@ static int previous_program_index(void) { return -1; }
 /* A stable, nonzero resource id for this process's one application. Host input
  * and audio share that application; there is no separate system applet client. */
 static uint64_t applet_resource_user_id(void) { return 1; }
+/* The native window is a Switch-compatible 2D display; Switch 2 and Labo VR modes are unavailable. */
+static unsigned char native_console_feature(void) { return 0; }
+static void end_vr_mode(void) {}
+static void begin_vr_mode(void) { runtime_fail("Labo VR mode is unavailable in the native macOS window"); }
+/* There is no Switch capture-button recorder; macOS recording remains user-controlled. */
+static void enable_recording(void) {}
 static unsigned char try_pop_launch_parameter(uint64_t *size,void *buffer,uint64_t capacity) {
     (void)buffer;(void)capacity;if(size)*size=0;return 0;
 }
@@ -67,12 +73,22 @@ static unsigned nfp_no_device(void) { return NFP_DEVICE_NOT_FOUND; }
 static int nfp_device_state(const void *h) { (void)h; return 0; }
 
 /* ---------- nn::err (nn::swkbd is in runtime/swkbd_host.c) ---------- */
+/* BOTW's DLC menu can open the Nintendo eShop, and its add-on content check can show a version error; the Mac has
+   neither applet. Returning is what the console does once the player closes them. */
+static void eshop_unavailable(void) { fprintf(stderr, "[totk] Nintendo eShop is not available in the native port\n"); }
+static void aoc_version_error(void) { fprintf(stderr, "[totk] game error dialog: add-on content version not accepted\n"); }
 static void show_error(uint32_t result) {
     fprintf(stderr, "[totk] game error dialog: %04u-%04u (result %#x)\n", 2000 + (result & 0x1ff), (result >> 9) & 0x1fff, result);
 }
 
 void *runtime_applet_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
+        {"_ZN2nn2pl16IsRunningOnOunceEv", native_console_feature},
+        {"_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdERKNS_7account10UserHandleE", eshop_unavailable},
+        {"_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", aoc_version_error},
+        {"_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", eshop_unavailable},
+        {"_ZN2nn2pl8IsVrModeEv", native_console_feature},
+        {"_ZN2nn2pl9EndVrModeEv", end_vr_mode}, {"_ZN2nn2pl11BeginVrModeEv", begin_vr_mode},
         {"_ZN2nn6applet23GetPreviousProgramIndexEv", previous_program_index},
         {"_ZN2nn6applet23GetAppletResourceUserIdEv", applet_resource_user_id},
         {"_ZN2nn2am23GetAppletResourceUserIdEv", applet_resource_user_id},
@@ -82,6 +98,7 @@ void *runtime_applet_override(const char *name) {
         {"_ZN2nn2oe44SetUserInactivityDetectionTimeExtendedUnsafeEb", inactivity_extended},
         {"_ZN2nn2oe17FinishStartupLogoEv", finish_startup_logo}, {"_ZN2nn2oe25TryPopNotificationMessageEPj", try_pop},
         {"_ZN2nn2oe22PopNotificationMessageEv", pop},
+        {"_ZN2nn2oe15EnableRecordingEv", enable_recording},
         {"_ZN2nn5prepo10PlayReport4SaveEv", report_save}, {"_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", report_save_uid},
         {"_ZN2nn5prepo28RequestImmediateTransmissionEv", immediate_transmission},
         {"_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", connection_status},

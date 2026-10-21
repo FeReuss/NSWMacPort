@@ -106,7 +106,7 @@ def main():
     for path in inputs + binaries:
         if fingerprints[str(path.relative_to(ROOT))] != digest(path):
             raise RuntimeError(f'Input/output changed during verification: {path}')
-    source_files = [vendor / name for name in ['patch_nso.py', 'call_window.py', 'structck.py', 'equiv.py', 'nsoimg.py', 'relr.py']]
+    source_files = [vendor / name for name in ['patch_nso.py', 'call_window.py', 'jump_table.py', 'structck.py', 'equiv.py', 'nsoimg.py', 'relr.py']]
     source_files += [ROOT / 'scripts' / name for name in ['test_call_window.py', 'test_exclusive_windows.py', 'native_call_probe.c', 'emit_native_call_fixture.py', 'verify_rewrites.py']]
     if version == 'v143': source_files += [ROOT / 'scripts' / name for name in ['test_v143_atomics.py', 'native_exclusive_probe.c']]
     summary = {

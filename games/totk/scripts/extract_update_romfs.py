@@ -22,6 +22,31 @@ from extract_romfs import index_romfs
 _LOCKPICK_KEK_SOURCE = re.compile(r'(?:mariko_)?master_kek_source_[0-9a-f]{2}\Z')
 
 
+def run_verified_hactool(command, environment, log_path, failure_path, failure):
+    """Run hactool into log_path; any data failure or a missing IVFC level raises."""
+    with log_path.open('w') as log:
+        code = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT).returncode
+    log = log_path.read_text()
+    # hactool also verifies the NCA's fixed-key and NPDM signatures, which need Nintendo's public keys:
+    # without them it always prints those two lines as (FAIL). They are not data failures; the six IVFC
+    # levels and the image SHA-256 the caller records decide whether the extraction worked.
+    unsigned = re.compile(r'\s*(?:Fixed-Key Signature|NPDM Signature) \(FAIL\)')
+    checked = '\n'.join(line for line in log.splitlines() if not unsigned.match(line))
+    if code or re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', checked):
+        # hactool repeats a key it cannot parse ("Key (<value>) must be 32 hex digits!"): keep no long hex in the log
+        failure_path.write_text(re.sub(r'[0-9A-Fa-f]{32,}', '<hex removed>', log))
+    require(code == 0 and not re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', checked), failure)
+    require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'Missing verified IVFC levels')
+
+
+def write_title_keys(path, tickets):
+    """Common-ticket keys for hactool (MNG_TITLE_KEYS): a private file, never an argument or log output."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        for rights, key in tickets.items():
+            f.write(f'{rights.hex()} = {key.hex()}\n')
+
+
 def copy_range(source, offset, size, target):
     with source.open('rb') as src, target.open('wb') as dst:
         src.seek(offset)
@@ -57,7 +82,7 @@ def hactool_prod_keys(source, target):
         f.write('\n'.join(lines) + ('\n' if lines else ''))
 
 
-def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
+def merge(base, update, keys_path, hactool, output, *, base_romfs=None, title_id='0100F2C0115B6000'):
     require(not output.exists(), 'Output exists')
     keys = load_keys(keys_path)
     inputs = []
@@ -71,7 +96,7 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
             for rights, key in found.items():
                 require(rights not in tickets or tickets[rights] == key, 'Conflicting common tickets')
                 tickets[rights] = key
-            record, header = program_nca(nca_inventory(f, entries, keys), update=is_update)
+            record, header = program_nca(nca_inventory(f, entries, keys), update=is_update, title_id=title_id)
             rights = header[0x230:0x240]
             require(rights == bytes(16) or rights in tickets, 'Missing common ticket')
             inputs.append((source, record, header))
@@ -85,10 +110,7 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
     with tempfile.TemporaryDirectory(prefix='update-merge-', dir=output.parent) as tmp:
         tmp = Path(tmp)
         keyfile = tmp/'title.keys'
-        fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'w') as f:
-            for rights, key in tickets.items():
-                f.write(f'{rights.hex()} = {key.hex()}\n')
+        write_title_keys(keyfile, tickets)
         source, record, _ = inputs[-1]
         copy_range(source, record_offset(record), record['size'], tmp/'update.nca')
         result = tmp/'result'
@@ -104,20 +126,8 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
         command = [str(hactool.resolve()), '-x', '-y', '--disablekeywarns', '--suppresskeys',
                    '-k', str(hactool_keys.resolve()), base_arg,
                    f'--section{sections[0]}='+str(result/'romfs.bin'), str(tmp/'update.nca')]
-        with (result/'merge.log').open('w') as log:
-            code = subprocess.run(command, env=environment,
-                                  stdout=log, stderr=subprocess.STDOUT).returncode
-        log = (result/'merge.log').read_text()
-        # hactool also verifies the NCA's fixed-key and NPDM signatures, which need Nintendo's public keys:
-        # without them it always prints those two lines as (FAIL). They are not data failures; the six IVFC
-        # levels and the image SHA-256 recorded below decide whether the merge worked.
-        unsigned = re.compile(r'\s*(?:Fixed-Key Signature|NPDM Signature) \(FAIL\)')
-        checked = '\n'.join(line for line in log.splitlines() if not unsigned.match(line))
-        if code or re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', checked):
-            # hactool repeats a key it cannot parse ("Key (<value>) must be 32 hex digits!"): keep no long hex in the log
-            (output.parent/(output.name+'-failure.log')).write_text(re.sub(r'[0-9A-Fa-f]{32,}', '<hex removed>', log))
-        require(code == 0 and not re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', checked), 'BKTR verification failed')
-        require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'Missing verified IVFC levels')
+        run_verified_hactool(command, environment, result/'merge.log', output.parent/(output.name+'-failure.log'),
+                             'BKTR verification failed')
         image = result/'romfs.bin'
         with image.open('rb') as f:
             digest = hashlib.file_digest(f, 'sha256').hexdigest()
@@ -134,8 +144,11 @@ if __name__ == '__main__':
     parser.add_argument('base', type=Path)
     parser.add_argument('update', type=Path)
     parser.add_argument('--keys', required=True, type=Path)
+    parser.add_argument('--title-id', type=lambda value: int(value, 0), default=0x0100F2C0115B6000,
+                        help='program title ID (default: TOTK; decimal or 0x-prefixed hex)')
     parser.add_argument('--hactool', required=True, type=Path)
     parser.add_argument('--base-romfs', type=Path, help='full decrypted base IVFC section, including hash levels (not a raw RomFS image)')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    merge(args.base, args.update, args.keys, args.hactool, args.output, base_romfs=args.base_romfs)
+    merge(args.base, args.update, args.keys, args.hactool, args.output,
+          base_romfs=args.base_romfs, title_id=f'{args.title_id:016X}')

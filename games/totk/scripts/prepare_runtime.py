@@ -13,11 +13,15 @@ sys.path.insert(0, str(ROOT / 'third_party/d2r'))
 from relr import decode_relr
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--version', choices=('v0','v112','v121','v143'), default='v0')
-version = parser.parse_args().version
+parser.add_argument('--game', choices=('totk','botw'), default='totk')
+args = parser.parse_args()
+game, version = args.game, args.version
 OUT = ROOT / ('build' if version == 'v0' else f'build/{version}')
 OUT.mkdir(parents=True, exist_ok=True)
 report = json.loads((ROOT / ('analysis/phase12-validation.json' if version == 'v0' else f'analysis/{version}-port/phase12-validation.json')).read_text())
 assert report['status'] == 'pass' and report['rom_version'] == version
+if game == 'botw':
+    assert version == 'v0' and report['module_file_sha256']['rewritten/v0/main.patched.bin'] == '6d48bff1b7f2692bd4f2efd3316b564877c50a10c6145610cf9a779b220538c6', 'Unsupported BOTW 1.9.0 main rewrite'
 if version == 'v112':
     expected = 'f04fbebdaacbcde0bcca20cbe0caff06bd51f7c8f904d217e5f17efe3308d1ac'
     assert report['module_file_sha256']['extracted/v112/exefs/main'] == expected, 'Unsupported 1.1.2 main image'
@@ -82,7 +86,7 @@ for name in ['main', 'subsdk0', 'sdk']:
         assert kind in ['cntpct', 'cntvct', 'svc']
         gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
     # Match each compiler's actual DT_INIT state load before decoding it.
-    flag_reg, load_offset = (19, 20) if version == 'v143' else (20, 24)
+    flag_reg, load_offset = (19, 20) if game == 'botw' or version == 'v143' else (20, 24)
     a, w = struct.unpack_from('<I', image, tags[12]+16)[0], struct.unpack_from('<I', image, tags[12]+load_offset)[0]
     assert a & 0x9f00001f == 0x90000000 | flag_reg and w & 0xffc003ff == 0xb9400008 | (flag_reg << 5)
     imm = ((a >> 29) & 3) | (((a >> 5) & 0x7ffff) << 2)

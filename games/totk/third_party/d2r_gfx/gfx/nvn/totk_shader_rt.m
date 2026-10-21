@@ -165,6 +165,16 @@ static int deps_match(NSDictionary *deps, NSDictionary *ans) {
     }
     return 1;
 }
+static int depth_matches(NSDictionary *variant, int stage, BOOL minus_w) {
+    return stage != 0 || [variant[@"depth_minus_w"] isEqual:@(minus_w)];
+}
+void totk_rt_probe_depth(void) {
+    for (int mode = 0; mode < 2; mode++) {
+        if (depth_matches(@{}, 0, mode) || !depth_matches(@{@"depth_minus_w": @(mode)}, 0, mode) ||
+            depth_matches(@{@"depth_minus_w": @(!mode)}, 0, mode) || !depth_matches(@{}, 1, mode))
+            die("shader cache reused a vertex translation with unknown or different depth mode");
+    }
+}
 
 /* No translator: the iPhone / iPad, or TOTK_SHADER_NO_TRANSLATE=1 on the Mac (tests: what a device with only the prepared
    shaders would skip, with the same miss records and skipped draws). */
@@ -178,11 +188,14 @@ static int no_translator(void) {
 #endif
 }
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local) {
+    BOOL minus_w = totk_depth_near_minus_w() != 0;
+    if (stage == 0) { NSMutableDictionary *a = [answers mutableCopy]; a[@"depth_minus_w"] = @(minus_w); answers = a; }
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     pthread_mutex_lock(&g_rt_lock);
     NSMutableArray *vs = variants_of(shader);
     for (NSUInteger i = 0; i < vs.count; i++) {
         NSDictionary *v = vs[i];
+        if (!depth_matches(v, stage, minus_w)) continue;
         if (!deps_match(v[@"deps"], answers)) continue;
         NSString *found = v[@"variant"];
         if (!g_msl_checked) g_msl_checked = [NSMutableSet set];
@@ -211,7 +224,7 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
     NSMutableDictionary *rq = [NSMutableDictionary dictionaryWithDictionary:@{@"variant": variant, @"stage": stage_name, @"code": code_path, @"c1": hex(code + c1o, c1t - c1o)}];
     [rq addEntriesFromDictionary:answers];
     if (local) rq[@"local"] = local;
-    rq[@"depth_minus_w"] = totk_depth_near_minus_w() ? @YES : @NO;   // nvnDeviceSetDepthMode: NEAR_IS_MINUS_W needs the GL -> Metal clip-z conversion in every vertex shader
+    rq[@"depth_minus_w"] = @(minus_w);   // NEAR_IS_MINUS_W needs the GL -> Metal clip-z conversion in every vertex shader
     if (no_translator()) {
     // No translator on the phone (Python + .NET + SPIRV-Cross): the variant cache is translated on the Mac and copied over.
     // A miss records the complete request (with the guest code bytes) under shader-requests/ for ios/tools/fill_shaders.py.
@@ -246,7 +259,9 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
     NSData *jd = [NSData dataWithContentsOfFile:[totk_rt_dir() stringByAppendingFormat:@"/%@_b.json", variant]];
     NSDictionary *refl = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (![refl isKindOfClass:[NSDictionary class]]) die("shader %s: reflection missing", variant.UTF8String);
-    [vs addObject:@{@"variant": variant, @"deps": refl[@"deps"] ?: @{}}];
+    NSMutableDictionary *entry = [@{@"variant": variant, @"deps": refl[@"deps"] ?: @{}} mutableCopy];
+    if (stage == 0) entry[@"depth_minus_w"] = @(minus_w);
+    [vs addObject:entry];
     [g_msl_checked addObject:variant];
     [[json_string(vs) dataUsingEncoding:NSUTF8StringEncoding] writeToFile:index_path(shader) atomically:YES];
     g_translated++;

@@ -103,6 +103,21 @@ Checks, without game data:
   samples against an unmodified Ryujinx.Audio (largest difference 4.47e-08), then 1,885,461 checks of the production
   effect graph, routing, capture / circular buffers and output prefill / recovery / stop.
 
+## Queued segments marked EndOfStream (BOTW)
+
+`EndOfStream` resets the played-sample counter; decoding and cursor advancement must
+continue into an already queued buffer in the same render block. Stopping at that flag
+inserted silence at each segment boundary. BOTW's opening supplies 14,336-sample ADPCM
+segments this way: a 240-sample render block lost its final 64 samples roughly every
+300 ms, although CoreAudio reported no underrun. The fix covers the decoding walk,
+the server cursor and empty markers; an exhausted queue still produces silence.
+
+`probe-audio` now checks 219,403 conditions, including synthetic PCM16 and ADPCM
+segments of that size, queued empty EOS markers, counter resets and the final drain.
+Restoring the former EOS early exits makes the new continuity check fail. This was
+traced in BOTW 1.9.0's opening, and the user confirmed that the cuts disappeared in
+the rebuilt session. Later scenes and other games still need listening checks.
+
 ## 中文说明
 
 这次确认的问题是：游戏将音频资源拼成了 `content://Sound/...`，旧版

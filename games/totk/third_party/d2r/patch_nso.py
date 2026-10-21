@@ -20,12 +20,13 @@
 #   Registered observation gates (OBS, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
-import struct, re, sys, os
+import struct, re, sys, os, hashlib
 from itertools import combinations
 import lz4.block
 from capstone import *
 from call_window import BLR_X18, BLR_X30, prepare_call
 from relr import decode_relr
+from jump_table import signed_table_span
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
@@ -634,7 +635,16 @@ SIGNED_TABLES = {'277178b7dba1b6d4949a84778d4abc58': {
     0x598ef4: (0x598ee4, 0x2d89038, (680,688,20,696,704,712,720,-5688,-2640), '12000010207ab0b85202008bdef747f940021fd6'),
     0x5f2a9c: (0x5f2a90, 0x2d892e0, (884,892,16,900,-6516), 'f0030f2a12000010207ab0b85202008b40021fd6'),
     0x6397d8: (0x6397cc, 0x2d88e7c, (1376,1384,16,1392,1400,1408,-7264), 'fb0301aa12000010207ab0b85202008b40021fd6'),
-}}
+},
+    # BOTW update main: signed offsets are relative to the table in rodata.
+    'cd57b23fa4bbad65803d9788c01821ee': {
+        0x37df10: (0x16a78e4, 0x16a78e4, (-20093392,-20093004,-20092640,-20092348,-20089864,-20092160,-20091472,-20090868,-20090332), '5f220071c86e0054527bb2b852021a8b40021fd6'),
+        0x37ee84: (0x16a7908, 0x16a7908, (-20089472,-20089092,-20088736,-20088452,-20086004,-20088268,-20087588,-20086992,-20086464), '5f220071e86c0054527bb2b852021a8b40021fd6'),
+        0x37fdbc: (0x16a7950, 0x16a7950, (-20085648,-20085256,-20084888,-20084592,-20082084,-20084400,-20083704,-20083096,-20082556), '5f220071e86f0054727bb2b852021b8b40021fd6'),
+    },
+}
+if BUILD_ID == 'cd57b23fa4bbad65803d9788c01821ee':
+    assert hashlib.sha256(d).hexdigest() == 'f6f0b20bb1f2b67d164c24871cd473147eef1d285f12e7bd492e3126c6022e27', 'BOTW update main differs from the analysed NSO'
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
     insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
@@ -658,12 +668,7 @@ for fa, fb in funcs:
                         if width: break
                     break
             if not width and ins.address in SIGNED_TABLES.get(BUILD_ID, {}):
-                adrbase, table, offsets, dispatch = SIGNED_TABLES[BUILD_ID][ins.address]
-                assert IMG[ins.address - 16:ins.address + 4].hex() == dispatch, f'signed-table dispatch {ins.address:x}'
-                assert struct.unpack_from('<' + 'i' * len(offsets), IMG, table) == offsets, f'signed-table entries {ins.address:x}'
-                targets = [adrbase + offset for offset in offsets]
-                assert all(0 <= target < TEXT_END and target % 4 == 0 for target in targets)
-                base, width = min(targets), (max(targets) - min(targets)) // 4 + 1
+                base, width = signed_table_span(IMG, ins.address, TEXT_END, SIGNED_TABLES[BUILD_ID][ins.address])
             assert base and width, f'jump table {ins.address:x}'
             jumps[ins.address] = (base, width)
         if ins.mnemonic == 'blr' and ins.op_str == 'x18':

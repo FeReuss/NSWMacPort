@@ -41,6 +41,7 @@ static AudioRenderer *renderer_new(const AudrenParameter *p) {
     pthread_mutex_init(&r->lock, NULL);
     r->event = runtime_event_new();
     r->state = 1;   /* stopped */
+    r->voice_drop_parameter = 1.0f;
     return r;
 }
 
@@ -89,7 +90,7 @@ static void skip_empty(AudioRenderer *r, ServerVoice *v) {
         if (b->loop && b->loop_count < 0) break;   /* an endless empty loop starves the voice, as on the DSP */
         v->valid[v->index] = 0; v->consumed++; v->offset = 0; v->loops_done = 0; v->index = (v->index + 1) & 3;
         if (r) r->empty_played++;
-        if (b->end_of_stream) { v->played = 0; break; }
+        if (b->end_of_stream) v->played = 0;
     }
 }
 static int stop_release(void) {
@@ -244,7 +245,7 @@ static void advance_voice(AudioRenderer *r, ServerVoice *v, double out_seconds) 
         if (v->offset < length) break;
         if (b->loop && (b->loop_count < 0 || v->loops_done < b->loop_count)) { v->loops_done++; v->offset = b->loop_start > b->start && b->loop_start < b->end ? (uint64_t)(b->loop_start - b->start) : 0; continue; }
         v->valid[v->index] = 0; v->consumed++; v->offset = 0; v->loops_done = 0; v->index = (v->index + 1) & 3;
-        if (b->end_of_stream) { v->played = 0; break; }
+        if (b->end_of_stream) v->played = 0;
         skip_empty(r, v);
     }
 }
@@ -310,6 +311,15 @@ static void renderer_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *r
     case 7: rs->copy[rs->ncopy++] = runtime_event_readable(r->event); return;
     case 8: r->time_limit = IPC_ARG(rq, uint32_t, 0); return;
     case 9: { uint32_t v = r->time_limit ? r->time_limit : 100; IPC_OUT(rs, v); return; }
+    /* shortcut: the host mixer renders all voices; apply this cost factor if deadline-based dropping is added. */
+    case 12: {
+        float v = IPC_ARG(rq, float, 0); need(isfinite(v), "voice drop parameter must be finite");
+        pthread_mutex_lock(&r->lock); r->voice_drop_parameter = v; pthread_mutex_unlock(&r->lock); return;
+    }
+    case 13: {
+        pthread_mutex_lock(&r->lock); float v = r->voice_drop_parameter; pthread_mutex_unlock(&r->lock);
+        IPC_OUT(rs, v); return;
+    }
     default: ipc_unimplemented(s, rq);
     }
 }
@@ -387,12 +397,61 @@ static int probe_rev15(void){
     free(input);audio_mixer_close(r);free(r->voices);free(r->pools);free(r->mixes);free(r->sinks);free(r->effects);free(r->channels);free(r);
     return checked;
 }
+/* EndOfStream resets played_samples; it does not interrupt a queued stream. */
+static int probe_stream_boundaries(void) {
+    enum {samples=14336,blocks=180};
+    static int16_t pcm[3][samples],coefficients[16];
+    static uint8_t adpcm[3][8192];
+    const int16_t levels[3]={4096,8192,-4096};
+    for(int b=0;b<3;b++) {
+        for(int k=0;k<samples;k++)pcm[b][k]=levels[b];
+        for(int k=0;k<8192;k+=8){adpcm[b][k]=12;memset(adpcm[b]+k+1,b==0?0x11:b==1?0x22:0xff,7);}
+    }
+    int checked=0;
+    for(int format=0;format<2;format++) {
+        AudrenParameter p={.sample_rate=48000,.sample_count=240,.mix_buffer_count=2,.voice_count=1,.sink_count=1,.revision=REV(15)};
+        AudioRenderer *r=renderer_new(&p);audio_mixer_open(r);
+        r->mixes[0]=(AudrenMixIn){.volume=1,.buffer_count=2,.in_use=1,.dest_mix_id=-1,.dest_splitter_id=~0u};
+        r->sinks[0]=(AudrenSinkIn){.type=SINK_DEVICE,.in_use=1,.input_count=2,.inputs={0,1}};
+        r->channels[0].mix[0]=r->channels[0].mix[1]=1;
+        AudrenVoiceIn v={.is_new=1,.in_use=1,.play_state=PLAY_STARTED,.sample_format=format?FMT_ADPCM:FMT_PCM16,.sample_rate=48000,.channel_count=1,.pitch=1,.volume=1,.mix_id=0,.splitter_id=~0u,.extra_address=(uintptr_t)coefficients,.extra_size=sizeof coefficients};
+        for(int b=0;b<3;b++) {
+            int slot=b?b+1:0;
+            v.wave_buffers[slot]=(AudrenWaveBuffer){.address=(uintptr_t)(format?(void *)adpcm[b]:(void *)pcm[b]),.size=format?sizeof adpcm[b]:sizeof pcm[b],.end=samples,.end_of_stream=1};
+        }
+        v.wave_buffers[1].end_of_stream=1; /* An empty marker also must not interrupt the next packet. */
+        update_voice(r,&v);
+        for(int block=0;block<blocks;block++) {
+            audio_voices_prepare(r);audio_mixer_render(r,240.0/48000);advance_voice(r,&r->voices[0],240.0/48000);
+            float out[480];need(audio_mixer_read(r,out,240)==240,"audio probe: stream boundary output");
+            for(int k=0;k<240;k++) {
+                int at=block*240+k;float expected=at<3*samples?levels[at/samples]/32768.f:0;
+                need(near(out[2*k],expected)&&near(out[2*k+1],expected),"audio probe: EOS inserted silence between queued packets");checked+=2;
+            }
+            if(block==59) {need(r->voices[0].index==2&&r->voices[0].offset==64&&r->voices[0].played==64&&r->voices[0].consumed==2,"audio probe: EOS frame remainder/counters");checked+=4;}
+        }
+        need(r->voices[0].consumed==4&&r->voices[0].played==0&&!r->voices[0].offset,"audio probe: stream drains after final packet");checked+=3;
+        audio_mixer_close(r);free(r->voices);free(r->pools);free(r->mixes);free(r->sinks);free(r->effects);free(r->channels);free(r);
+    }
+    return checked;
+}
 void runtime_audio_probe(void) {
     setenv("TOTK_AUDIO_OFF", "1", 1);
     const int neg = getenv("TOTK_PROBE_NEGATIVE") != NULL;
     AudrenParameter p = {48000, 240, 8, 1, 4, 1, 2, 0, 0, 0, 0, 0, 1, 2, 0, REV(11)};
     AudioRenderer *r = renderer_new(&p); audio_mixer_open(r);
-    int checked = probe_rev15();
+    int checked = probe_rev15()+probe_stream_boundaries();
+    /* The client wire carries a float, not an integer or an output buffer. */
+    IpcSession drop_session = {.state = r}; IpcRequest drop_request = {.cmd = 13}; IpcResponse drop_response = {0};
+    renderer_handler(&drop_session, &drop_request, &drop_response);
+    float drop_value = 0; memcpy(&drop_value, drop_response.data, sizeof drop_value);
+    need(drop_response.data_size == sizeof(float) && drop_value == 1.0f, "voice drop default IPC"); checked++;
+    drop_value = 0.25f; drop_request = (IpcRequest){.cmd = 12, .data = (const uint8_t *)&drop_value, .data_size = sizeof drop_value};
+    renderer_handler(&drop_session, &drop_request, &drop_response);
+    drop_request = (IpcRequest){.cmd = 13}; drop_response = (IpcResponse){0};
+    renderer_handler(&drop_session, &drop_request, &drop_response);
+    memcpy(&drop_value, drop_response.data, sizeof drop_value);
+    need(drop_response.data_size == sizeof(float) && drop_value == 0.25f, "voice drop parameter IPC round trip"); checked++;
     /* final mix 0: buffers 0-1; submix 1: buffers 2-3 -> mix 0 with a swap matrix at volume 0.5 */
     r->mixes[0] = (AudrenMixIn){.volume = 1, .sample_rate = 48000, .buffer_count = 2, .in_use = 1, .mix_id = 0, .dest_mix_id = 0x7fffffff, .dest_splitter_id = 0xffffffffu};
     r->mixes[1] = (AudrenMixIn){.volume = 0.5f, .sample_rate = 48000, .buffer_count = 2, .in_use = 1, .mix_id = 1, .dest_mix_id = 0, .dest_splitter_id = 0xffffffffu};

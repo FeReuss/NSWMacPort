@@ -119,6 +119,8 @@ int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned
  }
  return 0;
 }
+/* Original guest code (rewritten in place): a thread stopped here holds no host lock (threads.c core_force). */
+int runtime_guest_text(uint64_t pc){for(unsigned i=0;i<NM;i++)if(modules[i].base&&pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].text_end)return 1;return 0;}
 void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base&&a<(uintptr_t)modules[i].base+modules[i].size){snprintf(out,n,"%s+0x%llx",modules[i].name,(unsigned long long)(a-(uintptr_t)modules[i].base));return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
 /* Guest frame-pointer chain. Guest threads run on guest stacks (not the host pthread stack), so frames are read with
    mach_vm_read_overwrite (a bad pointer ends the walk instead of faulting); the chain must grow upwards. */
@@ -310,6 +312,7 @@ static void signal_hex(const char *label,uint64_t value) {
 }
 /* CTR_EL0 for 128-byte host cache lines: DminLine=IminLine=5 (32 words), ERG=CWG=5, PIPT I-cache, IDC/DIC clear. */
 #define HOST_CTR_EL0 0x8555c005ULL
+#ifndef NSW_GAME_BOTW
 /* #57: the same optional reference as below (object+0x6b0, a holder whose first word is the target) can outlive its
    holder: after long play the freed holder's memory held other data (the low region's base, two floats 1.0), the caller
    at GAME_ADDR(0x15ecb0c) passed that word as the target, and the callee faulted reading the target's id (+0x10). The
@@ -344,8 +347,10 @@ static int stale_target_reference(int num,siginfo_t *info,ucontext_t *u){
  static const char note[]="[totk] ignored a stale optional target reference (#57)\n";write(2,note,sizeof(note)-1);
  return 1;
 }
+#endif
 static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
+#ifndef NSW_GAME_BOTW
  if(stale_target_reference(num,info,u))return;
  /* During save load, this optional game object can contain a tagged invalid
     reference. Treat it as absent, as the following cbz path expects. */
@@ -367,6 +372,7 @@ static void crash(int num,siginfo_t *info,void *context) {
    }
   }
  }
+#endif
  /* EL0 cache maintenance that Darwin traps but Horizon allows: emulate exactly two encodings (SDK only). */
  if(num==SIGILL){uint32_t insn=*(const uint32_t *)(uintptr_t)u->uc_mcontext->__ss.__pc;unsigned rt=insn&31;
   if((insn&~31u)==0xd53b0020u){if(rt!=31)u->uc_mcontext->__ss.__x[rt]=HOST_CTR_EL0;u->uc_mcontext->__ss.__pc+=4;return;}   /* mrs Xt, CTR_EL0 */
@@ -444,7 +450,9 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  return 0;
 }
 uintptr_t runtime_frame_controller_return_pc(void) {
-#ifdef TOTK_GAME_V143
+#ifdef NSW_GAME_BOTW
+ return 0;
+#elif defined(TOTK_GAME_V143)
  /* The older graphics diagnostic reads the pre-1.4 controller layout. The survey only needs the system object (caller's x19
     at x29 + 0x38, same frame as 1.2.1) for its frame-end fence, so 1.4.3 finds it only while TOTK_SURVEY is on. */
  const char *survey=getenv("TOTK_SURVEY");

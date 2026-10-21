@@ -7,6 +7,7 @@
 #include "autoload.h"
 #include "runtime.h"
 #include "fs_host.h"
+#include "game_version.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -26,7 +27,7 @@
 #define R_INVALID_PATH 0x2ee602u
 #define R_OPEN_MODE 0x307402u
 #define R_APPEND_REQUIRED 0x2f5e02u
-#define TOTK_APPLICATION_ID 0x0100f2c0115b6000ULL
+#define TOTK_APPLICATION_ID NSW_APPLICATION_ID
 enum { M_FREE, M_SAVE, M_TEMP, M_CACHE };
 enum { OPEN_READ = 1, OPEN_WRITE = 2, OPEN_APPEND = 4 };
 #define FILE_BASE 0x200000000ULL
@@ -41,7 +42,7 @@ static Mount mounts[16];
 static File files[NFILES];
 static Dir dirs[NDIRS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static char profile[1024], save_root[1024];
+static char profile[1024], save_root[1024], storage[1024];
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 
 static void need(int c, const char *m) { if (!c) runtime_fail(m); }
@@ -72,11 +73,17 @@ static void init(void) {
     need(snprintf(profile, sizeof profile, "%s", dir) < (int)sizeof profile, "profile path");
     uint64_t uid[2]; runtime_account_uid(uid);
     char p[1100]; make_dir(profile);
-    snprintf(p, sizeof p, "%s/save", profile); make_dir(p);
-    need(snprintf(save_root, sizeof save_root, "%s/save/%016llx%016llx", profile, (unsigned long long)uid[1], (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
+    const char *saves = getenv("NSW_SAVES_DIR");
+    if (saves && *saves) need(snprintf(p, sizeof p, "%s", saves) < (int)sizeof p, "save base path");
+    else need(snprintf(p, sizeof p, "%s/save", profile) < (int)sizeof p, "save base path");
+    make_dir(p);
+    need(snprintf(save_root, sizeof save_root, "%s/%016llx%016llx", p, (unsigned long long)uid[1], (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
+    const char *cache = getenv("NSW_STORAGE_DIR");
+    need(snprintf(storage, sizeof storage, "%s", cache && *cache ? cache : profile) < (int)sizeof storage, "storage path");
+    make_dir(storage);
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
-    snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
-    snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
+    snprintf(p, sizeof p, "%s/temp", storage); remove_tree(p); make_dir(p);
+    snprintf(p, sizeof p, "%s/cache", storage); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);
 }
 static void ready(void) { pthread_once(&once, init); }
@@ -138,8 +145,8 @@ static unsigned mount_save_ro(const char *name, uint64_t application, const uint
     if (!save_exists(application, uid)) return R_TARGET_NOT_FOUND;
     return mount_add(name, M_SAVE, save_root);
 }
-static unsigned mount_temp(const char *name) { ready(); char p[1100]; snprintf(p, sizeof p, "%s/temp", profile); return mount_add(name, M_TEMP, p); }
-static void cache_dir(int index, char *out, size_t cap) { snprintf(out, cap, "%s/cache/%d", profile, index); }
+static unsigned mount_temp(const char *name) { ready(); char p[1100]; snprintf(p, sizeof p, "%s/temp", storage); return mount_add(name, M_TEMP, p); }
+static void cache_dir(int index, char *out, size_t cap) { snprintf(out, cap, "%s/cache/%d", storage, index); }
 static unsigned create_cache(int index, int64_t size, int64_t journal) {
     ready(); if (index < 0 || size < 0 || journal < 0) return R_INVALID_ARGUMENT;
     char p[1100]; cache_dir(index, p, sizeof p);
@@ -157,7 +164,7 @@ typedef struct { int list[64]; int count, next; } CacheList;
 static unsigned open_cache_list(uint64_t *out) {
     ready(); if (!out) return R_INVALID_ARGUMENT;
     CacheList *l = calloc(1, sizeof *l); need(l != NULL, "cache list allocation");
-    char p[1100]; snprintf(p, sizeof p, "%s/cache", profile); DIR *d = opendir(p); struct dirent *e;
+    char p[1100]; snprintf(p, sizeof p, "%s/cache", storage); DIR *d = opendir(p); struct dirent *e;
     while (d && (e = readdir(d)) && l->count < 64) { char *end; long v = strtol(e->d_name, &end, 10); if (*e->d_name && !*end && v >= 0) l->list[l->count++] = (int)v; }
     if (d) closedir(d);
     *out = (uint64_t)(uintptr_t)l; return 0;
@@ -172,7 +179,7 @@ static void unmount(const char *name) {
     pthread_mutex_lock(&lock);
     for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, name)) { mounts[i].kind = M_FREE; pthread_mutex_unlock(&lock); return; }
     pthread_mutex_unlock(&lock);
-    if (!runtime_romfs_owns(name)) runtime_fail("unmount of unknown fs mount");
+    if (!runtime_romfs_unmount(name)) runtime_fail("unmount of unknown fs mount");   /* the game RomFS or the DLC (aoc) */
 }
 static unsigned commit(const char *name) {
     pthread_mutex_lock(&lock); int found = 0, save = 0;
@@ -313,8 +320,11 @@ void runtime_save_probe(void) {
 #define CHECK(c, what) do { checks++; if (!(c)) { fprintf(stderr, "save probe: %s\n", what); runtime_fail("save probe failed"); } } while (0)
     CHECK(mount_save("save", uid) == 0 && mount_temp("temp") == 0, "mount save and temporary storage");
     CHECK(!runtime_fs_save_busy(), "idle at start");
+    unsigned (*commit_save)(const char *) = runtime_fs_host_override("_ZN2nn2fs14CommitSaveDataEPKc");
+    CHECK(commit_save != NULL, "legacy save commit entry point is available");
+    CHECK(commit_save("missing") == R_PATH_NOT_FOUND, "legacy commit rejects an unmounted name");
     CHECK(create_file("save:/a.sav", 16) == 0 && runtime_fs_save_busy(), "creating a save file starts a save");
-    CHECK(commit("save") == 0 && !runtime_fs_save_busy(), "commit ends it");
+    CHECK(commit_save("save") == 0 && !runtime_fs_save_busy(), "legacy save commit ends it");
     CHECK(open_file(&h, "save:/a.sav", OPEN_WRITE) == 0 && runtime_fs_save_busy(), "a save file open for writing");
     static const char data[16] = "progress";
     CHECK(write_file(h, 0, data, sizeof data, NULL) == 0 && runtime_fs_save_busy(), "writing");
@@ -353,6 +363,7 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
+        {"_ZN2nn2fs14CommitSaveDataEPKc", commit},
         {"_ZN2nn2fs18CreateCacheStorageEill", create_cache}, {"_ZN2nn2fs18DeleteCacheStorageEi", delete_cache},
         {"_ZN2nn2fs17MountCacheStorageEPKci", mount_cache},
         {"_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", open_cache_list},

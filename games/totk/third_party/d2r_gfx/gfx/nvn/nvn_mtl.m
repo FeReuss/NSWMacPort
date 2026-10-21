@@ -4249,14 +4249,29 @@ static void mfx_snapshot_scene(void) {
     enc_b_end(g_blit); g_blit = nil;
     g_mfx.scene_done = 1; mfx_note_scene();
 }
-static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
-static id<MTL4RenderCommandEncoder> rp_begin(void) { return rp_begin_ex(0); }
-static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
+static int color_alias(const p_set_rt *rt, int a, int b) {
+    const tex_t *x = rt->color[a], *y = rt->color[b];
+    if (!x || !y || x->serial != y->serial) return 0;
+    const view_t *u = &rt->cview[a], *v = &rt->cview[b];
+    return (rt->has_cview[a] && u->set_levels ? u->base_level : 0) == (rt->has_cview[b] && v->set_levels ? v->base_level : 0) &&
+           (rt->has_cview[a] && u->set_layers ? u->min_layer : 0) == (rt->has_cview[b] && v->set_layers ? v->min_layer : 0);
+}
+static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only, uint8_t color_writes);
+static id<MTL4RenderCommandEncoder> rp_begin(void) { return rp_begin_ex(0, 0); }
+static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only, uint8_t color_writes) {
     if (g_enc) return g_enc;
     chunk_maybe_split();
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only;
     if (!R.has_rt) { RED_ONCE(3, "绘制前没有设置渲染目标"); return nil; }
+    /* NVN allows a texture in several slots when only one writes; Metal forbids overlapping attachments. */
+    uint8_t selected = 0xff, needed = color_writes;
+    for (int i = 0; i < R.rt.n; i++) if (R.clear_c[i]) needed |= 1u << i;
+    for (int i = 0; i < R.rt.n; i++) if (selected >> i & 1) for (int j = i + 1; j < R.rt.n; j++) {
+        if (!(selected >> j & 1) || !color_alias(&R.rt, i, j)) continue;
+        if (!(needed >> j & 1)) selected &= ~(1u << j);
+        else if (!(needed >> i & 1)) { selected &= ~(1u << i); break; }
+    }
     int lay_first = 0, lay_n = lay_decide(clear_only, &lay_first);   // TOTK: layered pass over lay_n layers from lay_first (see g_lay)
     if (!lay_n && !clear_only && g_cg_force_layers) { lay_n = g_cg_force_layers; lay_first = 0; }   // TOTK: the merged cube-face-set pass (nvn_cube_group.h): six temps, one layer per member
     // 附件范围候选的版本在捕获任何附件之前取；建立途中有变化则不续用。
@@ -4266,17 +4281,17 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     if (rt_range_on()) dirty0=nvn_dirty_now();
     blk_wb pre[8]; id<MTLTexture> preaux[8] = {nil};
     for (int i = 0; i < R.rt.n && i < 8; i++) {   // block-render passes that keep old contents load them into the auxiliary texture first
-        if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue;
+        if (!R.rt.color[i] || !(selected >> i & 1) || (clear_only == 1 && !R.clear_c[i])) continue;
         preaux[i] = blk_aux(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i], &pre[i]);
         if (preaux[i] && !R.clear_c[i]) blk_copy(pre[i].dst, 0, preaux[i], &pre[i]);
     }
-    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && !(clear_only == 1 && !R.clear_c[i])) (void)attachment_texture(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);   // TOTK: a storage-shared attachment may be recreated here (a blit), before the blit encoder is ended
+    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && (selected >> i & 1) && !(clear_only == 1 && !R.clear_c[i])) (void)attachment_texture(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);   // TOTK: a storage-shared attachment may be recreated here (a blit), before the blit encoder is ended
     if (R.rt.depth) (void)attachment_texture(R.rt.depth, &R.rt.dview, R.rt.has_dview);
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *pd = [MTL4RenderPassDescriptor new];
     int any = 0;
     for (int i = 0; i < R.rt.n; i++) {
-        if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue;
+        if (!R.rt.color[i] || !(selected >> i & 1) || (clear_only == 1 && !R.clear_c[i])) continue;
         attach(pd.colorAttachments[i], R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
         { const tex_t *ot = R.rt.color[i]; int was = gpu_owned(ot->serial); gpu_owned_mark(ot->serial);
           if (ot->mem && tex_mirrored(ot)) wb_note(ot);
@@ -4445,7 +4460,7 @@ static void rt_dims(NSUInteger *tw, NSUInteger *th) {
 static void rp_flush(void) {
     int pend = R.clear_d || R.clear_s;
     for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
-    if (pend && !g_enc && g_cb) rp_begin_ex(1);
+    if (pend && !g_enc && g_cb) rp_begin_ex(1, 0);
     rp_end();
 }
 static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
@@ -4854,11 +4869,11 @@ static NvShader *shader_load(NSString *pc, int stage) {
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
     id<MTLLibrary> lib = nil;
     if (rt) {
-#if TARGET_OS_IPHONE
-        // iOS: the variant precompiled on the Mac (ios/tools/build_metallibs.sh, same options) if it came in shaders.pack
-        NSString *rt_lib = [NSString stringWithFormat:@"%@/%@.metallib", totk_rt_dir(), pc];
-        if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else atomic_fetch_add(&g_rt_prebuilt, 1); }
-#endif
+        // Prepared variant libraries use safe math; macOS fast-math runs compile their own source instead.
+        if (TARGET_OS_IPHONE || !(getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH")))) {
+            NSString *rt_lib = [NSString stringWithFormat:@"%@/%@.metallib", totk_rt_dir(), pc];
+            if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else atomic_fetch_add(&g_rt_prebuilt, 1); }
+        }
         if (!lib) { NSData *raw = [NSData dataWithContentsOfFile:rt_src options:0 error:&e];
 #if !TARGET_OS_IPHONE
                     if (raw && (lib = shader_lib_prebuilt(raw))) atomic_fetch_add(&g_rt_prebuilt, 1);
@@ -4956,16 +4971,25 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
     for (unsigned i = 0; i < p->nstage; i++) {
         const uint8_t *control=p->sd[i].control;uint32_t length=0,nvn_stage=0;
         if (!control || !p->sd[i].data) MDIE("null TOTK shader binary");
+        size_t control_size = 0x880;
+#ifdef NSW_GAME_BOTW
+        uint32_t h[9]; memcpy(h, control, sizeof h);
+        if (h[0] != 0x98761234 || h[1] != 1 || h[3] != 0x120 || h[4] != 11 || h[7] ||
+            !((h[2] == 9 && h[5] == 0x7d0 && h[8] >= 0x7d1 && h[6] == h[8] - 0x7d1) ||
+              (h[2] == 14 && h[5] == 0 && h[6] == 0 && h[8] == 0x848)))
+            MDIE("unsupported BOTW shader control header");
+        control_size = h[2] == 9 ? 0x7d1 : 0x848;   // Appended reflection can contain relocated pointers.
+#endif
         memcpy(&length,control+0x704,4);memcpy(&nvn_stage,control+0x714,4);
         if (!length || length>16*1024*1024) MDIE("invalid TOTK shader code length %u",length);
         // Host NVN GPU addresses are CPU addresses (MemoryPoolGetBufferAddress).
-        uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);CC_SHA256_Update(&ctx,control,0x880);
+        uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);CC_SHA256_Update(&ctx,control,(CC_LONG)control_size);
         CC_SHA256_Update(&ctx,(const void *)(uintptr_t)p->sd[i].data,length);CC_SHA256_Final(md,&ctx);
         char key[65];for(unsigned j=0;j<32;j++)snprintf(key+2*j,3,"%02x",md[j]);
         // TOTK: stage from control+0x714 (0 vertex, 1 fragment, 5 compute); translation answered from the bound state.
         int st=(int)nvn_stage;if(st!=0&&st!=1&&st!=5)MDIE("TOTK shader %s: unsupported NVN stage %u",key,nvn_stage);
         if (getenv("TOTK_CS_PROBE")) { static int nd; if (nd++ < 6) { char b[4096]; size_t o = 0; const uint8_t *cd = (const uint8_t *)(uintptr_t)p->sd[i].data;
-            for (int k = 0x6c0; k < 0x880; k += 4) { uint32_t w; memcpy(&w, control + k, 4); if (w) o += snprintf(b + o, sizeof b - o, " %03x:%x", k, w); }
+            for (int k = 0x6c0; k + 4 <= control_size; k += 4) { uint32_t w; memcpy(&w, control + k, 4); if (w) o += snprintf(b + o, sizeof b - o, " %03x:%x", k, w); }
             o += snprintf(b + o, sizeof b - o, " | code:"); for (int k = 0; k < 0x30; k += 4) { uint32_t w; memcpy(&w, cd + k, 4); o += snprintf(b + o, sizeof b - o, " %x", w); }
             MLOG("[ctl st%d]%s", st, b); } }
         NSString *variant=totk_rt_variant(@(key),st,control,(const uint8_t *)(uintptr_t)p->sd[i].data,rt_answers(st),rt_local(control,st));
@@ -5505,6 +5529,8 @@ static int cls_of(int f) { switch (f) {
 static const treg_t *bound_tex(uint64_t h);
 static uint64_t stage_sig(int st) {
     uint64_t sg = 0;
+    extern int totk_depth_near_minus_w(void);
+    if (st == 0 && totk_depth_near_minus_w()) sg |= 1ull << 32;
     if (st == 1 && R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i])
         sg |= (uint64_t)(1 + cls_of(R.rt.has_cview[i] && R.rt.cview[i].set_format ? R.rt.cview[i].format : R.rt.color[i]->d.format)) << (3 * i);
     if (st == 0) for (int i = 0; i < S.nattr && i < 16; i++) sg |= (uint64_t)cls_of(S.attr[i].fmt) << (2 * i);
@@ -6272,6 +6298,13 @@ static void warm_enqueue(WarmItem *item) {
 /* Count the exact manifest rows and cached variants this run will visit before
    displaying a determinate bar. Shader/PSO counts are separate: one pipeline
    row may load two shaders, and a failed row still advances the task bar. */
+static BOOL warm_full_cache(void) {
+#ifdef NSW_GAME_BOTW
+    return NO; // Expanded offline libraries are loaded from disk on demand, without retaining the entire catalogue.
+#else
+    return YES;
+#endif
+}
 static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NSMutableSet<NSString *> *keys,
                       NSMutableSet<NSString *> *eligible,
                       uint64_t *tasks, uint64_t *shaders, uint64_t *pipelines) {
@@ -6281,6 +6314,7 @@ static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NS
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
             if (!line.length || [line hasPrefix:@"#"] || [rows containsObject:line]) continue;
+            if (!warm_full_cache() && [path hasSuffix:@"/shader-seed/pso_manifest.tsv"] && [line hasPrefix:@"S\t"]) continue;
             [rows addObject:line];
             NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
             if ([c[0] isEqualToString:@"S"] && c.count >= 3 && [c[1] length]) {
@@ -6386,7 +6420,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         // extend the measured total rather than being silently omitted.
         NSMutableArray<NSString *> *cache_files = [files mutableCopy];
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
-        NSArray<NSString *> *latest = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)];
+        NSArray<NSString *> *latest = warm_full_cache() ? [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)] : @[];
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
             // The native service publishes reflection last. A newly written
             // MSL with no reflection yet is still in flight, not a failed shader.
@@ -6561,7 +6595,7 @@ static void warm_start(void) {
         MLOG("预热清单（自动着色器收集）：%s；另加翻译缓存里的全部着色器", desc.UTF8String);
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
-    NSArray<NSString *> *files = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    NSArray<NSString *> *files = warm_full_cache() ? [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[] : @[];
     uint64_t total = 0, shader_total = 0, pipeline_total = 0;
     NSMutableSet<NSString *> *planned_keys = [NSMutableSet set];
     NSMutableSet<NSString *> *eligible = [NSMutableSet set];
@@ -7984,7 +8018,7 @@ static void hoist_try(void) {
                         R.rt = *g->rt; memcpy(R.clear_c, g->clear_c, 8); memcpy(R.cc, g->cc, sizeof R.cc); R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs;
                         R.sc = g->sc; R.has_sc = g->has_sc;
                         PD("H %llu 前提纯清除通道（原位置在本通道之后）", g_stat_pass + 1);
-                        rp_begin_ex(1); rp_end();
+                        rp_begin_ex(1, 0); rp_end();
                     }
                     R.rt = rt0; R.sc = sc0; R.has_sc = hs0; memcpy(R.clear_c, cc0f, 8); memcpy(R.cc, cc0, sizeof cc0); R.clear_d = cd0f; R.clear_s = cs0f; R.cd = cd0; R.cs = cs0;
                     if (!g_hoist_groups) MLOG("纯清除通道前提：首例 %d 组（通道 %llu 前）", ng, g_stat_pass + 1);
@@ -8832,7 +8866,8 @@ static void clear_quad(const p_clear_color *c) {
     const tex_t *t = R.rt.color[c->index];
     int f = R.rt.has_cview[c->index] && R.rt.cview[c->index].set_format ? R.rt.cview[c->index].format : t->d.format;
     if (cls_of(f)) MDIE("partial color clear of integer render target format %#x not implemented", f);
-    id<MTL4RenderCommandEncoder> en = rp_begin(); if (!en) return;
+    if (g_enc && !g_pass.cfmt[c->index]) rp_end();
+    id<MTL4RenderCommandEncoder> en = rp_begin_ex(0, 1u << c->index); if (!en) return;
     NSUInteger tw = g_pass.tw, th = g_pass.th; MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th; if (x1 <= x0 || y1 <= y0) return;
@@ -9647,6 +9682,13 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     if (!g_enc && tbdr_on() && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) { g_draw_skip[7]++; return; } }
     if (!g_enc && tbdr_on() && !g_fz_checking) fuse_try();   // 可读 tile 通道合并缺省开；结构 / 本像素证明不成立仍退回普通通道，CHECK 重画时不重入 | Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
 frz_plain:;
+    uint8_t color_writes = 0;
+    for (int i = 0; i < 8; i++) if ((S.chmask.mask >> (4 * i)) & 15) color_writes |= 1u << i;
+    if (g_fz.active) color_writes = 0xff;
+    for (int i = 0; i < R.rt.n; i++) if (R.clear_c[i]) for (int j = 0; j < R.rt.n; j++)
+        if (i != j && (color_writes >> j & 1) && color_alias(&R.rt, i, j)) { rp_flush(); break; }
+    if (g_enc) for (int i = 0; i < R.rt.n; i++)
+        if (R.rt.color[i] && (color_writes >> i & 1) && !g_pass.cfmt[i]) { rp_end(); break; }
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 都不挂 3 只挂模板 4 只挂深度 | 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc && !g_cg.replaying && cg_on()) {   // TOTK: cube-face-set pass groups (nvn_cube_group.h)
@@ -9659,7 +9701,7 @@ frz_plain:;
     if (!g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key) && mfx_enabled())
         mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
     if (!g_uw_ui && uw_on_canvas() && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key)) g_uw_ui = 1;   // key 4: the UI begins
-    id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
+    id<MTLRenderCommandEncoder> en = rp_begin_ex(mode, color_writes);
     g_fd_dw = NULL; g_fd_di = NULL;
     if (!en) { g_draw_skip[8]++; return; }
     if (g_pass.mfx || g_mfx.role) {   // TOTK_MFX: every draw into the canvas after the scene copy goes to the UI layer too
@@ -10011,6 +10053,8 @@ static id<MTL4ComputeCommandEncoder> disp_enc(void) {
     return g_blit;
 }
 static void dispatch(const p_dispatch *dp) {
+    if (dp->x < 0 || dp->y < 0 || dp->z < 0) MDIE("negative compute dispatch grid %dx%dx%d", dp->x, dp->y, dp->z);
+    if (!dp->x || !dp->y || !dp->z) return; /* An empty NVN grid does no work; Metal rejects it. */
     zskip_clear();
     if (!S.prog) { RED_ONCE(27, "派发前没有绑定程序"); return; }
     __unsafe_unretained NvProg *cpr = prog_get(S.prog);
@@ -10670,6 +10714,7 @@ void mtl_exec(const uint8_t *p) {
                 if (g_rt_merged) rp_end();   // 续用的通道里来了清除：在此结束，清除照旧挂到下一个通道开头 | A clear arrived in a continued render pass: end it here, and the clear is attached to the start of the next render pass as usual
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(5, "清色目标 %d 无效", c->index); break; }
                 if (g_enc || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) { if ((c->mask & 0xf) && !S.render_disabled) clear_quad(c); break; }
+                for (int i = 0; i < R.rt.n; i++) if (i != c->index && R.clear_c[i] && color_alias(&R.rt, i, c->index)) { rp_flush(); break; }
                 R.clear_c[c->index] = 1; R.cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
                 break;
             }
@@ -12659,7 +12704,50 @@ int mtl_probe_ds_clear(void) {
         if (fabsf(pd[i] - z) > 0.000001f || ps[i] != st) MDIE("depth/stencil clear mismatch at %lu,%lu: depth %g != %g, stencil %#x != %#x", x, y, pd[i], z, ps[i], st);
         checked += 6;
     }
-    memset(&R, 0, sizeof R); serial_del(ct.serial); serial_del(dt.serial);
+    /* Repeated inactive NVN color slots must not become overlapping Metal attachments. */
+    NSError *error = nil;
+    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; }; struct C { float4 a [[color(0)]]; float4 b [[color(1)]]; }; vertex V va(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return {float4(p[i],0.375,1)}; } fragment C fa() { return {float4(.2,.4,.6,1),float4(.6,.4,.2,1)}; }\n";
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
+    if (!lib) MDIE("aliased color probe shader: %s", error.localizedDescription.UTF8String);
+    NvShader *vs = [NvShader new], *fs = [NvShader new];
+    vs->fn = [lib newFunctionWithName:@"va"]; fs->fn = [lib newFunctionWithName:@"fa"];
+    vs->io = fs->io = @{}; vs->rf.route_b = fs->rf.route_b = 1; fs->rf.color_mask = 3;
+    NvProg *pr = [NvProg new]; pr->sh[0] = vs; pr->sh[1] = fs;
+    prog_t program = {0}; program.serial = 0xffffffd2; serial_put(program.serial, pr);
+    mtl_sub_begin(); state_reset(); memset(&R, 0, sizeof R);
+    R.has_rt = 1; R.rt.n = 2; R.rt.color[0] = R.rt.color[1] = &ct; R.rt.depth = &dt;
+    S.prog = &program; S.poly.cull = NVN_FACE_NONE; S.ds.dt = S.ds.dw = 1; S.ds.df = NVN_DEPTH_FUNC_ALWAYS;
+    S.has_vp = 1; S.vp[0][2] = W; S.vp[0][3] = H;
+    S.chmask.mask = 0; p_draw triangle = {.prim = 4, .count = 3, .instances = 1}; draw(&triangle, NULL);
+    if (!g_pass.cfmt[0] || g_pass.cfmt[1]) MDIE("aliased color probe: inactive duplicates were attached");
+    enc_b_copy_texture_buffer(blit(), color, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(W,H,1), rc, 0, W*4, W*H*4);
+    mtl_sub_commit(); mtl_finish();
+    for (NSUInteger i = 0; i < W*H*4; i++) {
+        if (abs((int)((const uint8_t *)rc.contents)[i] - (int[]){64,128,191,255}[i%4]) > 1) MDIE("depth-only draw changed an aliased color");
+        checked++;
+    }
+    mtl_sub_begin(); S.chmask.mask = 0xf; g_pso_dirty = 1; draw(&triangle, NULL);
+    uint64_t first_pass = g_pass.serial;
+    S.chmask.mask = 0xf0; g_pso_dirty = 1; draw(&triangle, NULL);
+    if (g_pass.serial == first_pass || g_pass.cfmt[0] || !g_pass.cfmt[1]) MDIE("aliased color probe: newly writable slot did not split the pass");
+    p_clear_color clear = {.index = 0, .mask = 5, .rgba = {.25,.5,.75,1}};
+    clear_quad(&clear); rp_end();
+    enc_b_copy_texture_buffer(blit(), color, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(W,H,1), rc, 0, W*4, W*H*4);
+    mtl_sub_commit(); mtl_finish();
+    for (NSUInteger i = 0; i < W*H*4; i++) {
+        if (abs((int)((const uint8_t *)rc.contents)[i] - (int[]){64,102,191,255}[i%4]) > 1) MDIE("aliased color probe: logical output or partial clear lost data");
+        checked++;
+    }
+    mtl_sub_begin();
+    struct { op_hdr h; p_clear_color c; op_hdr end; } cop = {{OP_CLEAR_COLOR, 8+sizeof(p_clear_color)}, {.index=0,.mask=15,.rgba={1,0,0,1}}, {OP_END,8}};
+    mtl_exec((const uint8_t *)&cop); cop.c.index = 1; cop.c.rgba[0] = 0; cop.c.rgba[1] = 1; mtl_exec((const uint8_t *)&cop); rp_flush();
+    enc_b_copy_texture_buffer(blit(), color, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(W,H,1), rc, 0, W*4, W*H*4);
+    mtl_sub_commit(); mtl_finish();
+    for (NSUInteger i = 0; i < W*H*4; i++) {
+        if (((const uint8_t *)rc.contents)[i] != (int[]){0,255,0,255}[i%4]) MDIE("aliased color probe: ordered full clears lost data");
+        checked++;
+    }
+    state_reset(); memset(&R, 0, sizeof R); serial_del(program.serial); serial_del(ct.serial); serial_del(dt.serial);
     for (id o in @[color, depth, rc, rd, rs]) defer_obj_release(o); return checked;
 }
 
@@ -13367,6 +13455,9 @@ int mtl_probe_dispatch_chain(void) {
     S.ssbo[5][0] = (p_bind_buf){5, 0, (uint64_t)(uintptr_t)s0, SZ}; S.ssbo[5][1] = (p_bind_buf){5, 1, (uint64_t)(uintptr_t)s1, SZ};
     const prog_t *saved = S.prog; uint64_t shared0 = g_disp_shared;
     rp_end(); blit_close();
+    S.prog = &pg[0];
+    const p_dispatch empty[] = {{0,1,1,0}, {1,0,1,0}, {1,1,0,0}};
+    for (unsigned i = 0; i < sizeof empty / sizeof *empty; i++) dispatch(&empty[i]);
     for (int r = 0; r < R; r++) for (int k = 0; k < 2; k++) { S.prog = &pg[k]; p_dispatch dp = {N / 64, 1, 1, 0}; dispatch(&dp); }
     uint64_t shared = g_disp_shared - shared0;
     S.prog = saved; mtl_sub_commit(); mtl_finish(); memset(&S.ssbo, 0, sizeof S.ssbo);

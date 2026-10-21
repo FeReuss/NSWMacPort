@@ -1,7 +1,6 @@
 // The launcher inside the packaged app (build_app.py compiles it as Contents/MacOS/TOTK).
 // The game itself is Contents/Resources/totk/build/totk-native; everything it writes goes to the player's own folders:
-//   ~/Library/Application Support/MacNativeGames/TOTK/   profile (account, saves), shader cache, game slot, RomFS proof
-//   ~/Library/Logs/MacNativeGames/totk.log             this run (totk.previous.log: the one before)
+//   ~/Documents/NSW Games/<game>/   portable saves, settings, shaders, screenshots and logs
 // If the game is already running, the launcher only brings it to the front.
 #import <AppKit/AppKit.h>
 #include <errno.h>
@@ -15,6 +14,7 @@
 #include <unistd.h>
 #include "dmsh_chain.h"   // DMSH_CHAIN: the shader translation chain the cache folder is named after
 #include "game_version.h"
+#include "game_storage.h"
 #include "controller_map.h"
 #include "include/totk_ui_lang.h"
 #include "totk_shader_contrib.h"   // the shared shader list contribution and its reminder
@@ -65,7 +65,7 @@ static pid_t running_game(NSString *slot) {
 
 /* Every TOTK_CONTRIB_STEP shaders the shared list does not have yet (totk_shader_contrib.h), before the game starts: ask
    the player to send the file in a GitHub issue. "Send" opens the issue form and shows the file in Finder to drag in. */
-static void contrib_reminder(NSString *path) {
+static void __attribute__((unused)) contrib_reminder(NSString *path) {
     NSUInteger rows = totk_contrib_due(path);
     if (!rows) return;
     totk_contrib_reminded(path, rows);   // "next time": TOTK_CONTRIB_STEP rows later; "don't remind me again": never
@@ -90,7 +90,7 @@ static BOOL make_dir(NSString *path) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        NSString *root = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"totk"];
+        NSString *root = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@NSW_RESOURCE_DIR];
         NSString *binary = [root stringByAppendingPathComponent:@"build/totk-native"];
         /* --check (build_app.py, once after packaging): only look that the game is there and exit. The first run of a new
            app is when macOS scans the whole bundle (minutes for 16 GB, with nothing on screen); doing it during the build
@@ -107,31 +107,45 @@ int main(int argc, char **argv) {
             return 1;
         }
         NSString *home = NSHomeDirectory();
-        NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/TOTK"];
-        NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
+        NSError *storageError = nil;
+        NSString *data = nsw_storage_prepare(home, @NSW_GAME_FAMILY, @NSW_GAME_FOLDER, &storageError);
+        if (!data) { show_error(storageError.localizedDescription ?: @"Cannot prepare the player-data folder."); return 1; }
+        NSString *logs = [data stringByAppendingPathComponent:@"Logs"];
+        if (argc > 1 && !strcmp(argv[1], "--prepare-data")) { puts(data.fileSystemRepresentation); return 0; }
         /* Folders the environment already names are kept (open --env TOTK_PROFILE_DIR=... runs a test on a save copy,
            TOTK_GAME_SLOT_DIR shares one game slot with another build of the game: one game at a time on the Mac). */
         NSString *(^env_or)(const char *, NSString *) = ^NSString *(const char *name, NSString *fallback) {
             const char *v = getenv(name); return v && *v ? @(v) : fallback; };
-        NSString *profile = env_or("TOTK_PROFILE_DIR", [data stringByAppendingPathComponent:@"profile"]);
-        NSString *slot = env_or("TOTK_GAME_SLOT_DIR", [data stringByAppendingPathComponent:@"game-slot"]);
-        NSString *cache = env_or("TOTK_SHADER_CACHE", [data stringByAppendingPathComponent:[NSString stringWithFormat:@"shader-cache/rt-%s", DMSH_CHAIN]]);
+        NSString *profile = env_or("TOTK_PROFILE_DIR", [data stringByAppendingPathComponent:@"Settings"]);
+        BOOL separateProfile = getenv("TOTK_PROFILE_DIR") && *getenv("TOTK_PROFILE_DIR");
+        NSString *saves = env_or("NSW_SAVES_DIR", separateProfile ? [profile stringByAppendingPathComponent:@"save"] : [data stringByAppendingPathComponent:@"Saves"]);
+        NSString *storage = env_or("NSW_STORAGE_DIR", separateProfile ? profile : [data stringByAppendingPathComponent:@"Cache"]);
+        NSString *slot = env_or("TOTK_GAME_SLOT_DIR", [data.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".runtime/game-slot"]);
+        NSString *cache = env_or("TOTK_SHADER_CACHE", nsw_shader_cache_path(data, DMSH_CHAIN, YES));
         if (!make_dir(profile) || !make_dir(slot) || !make_dir(cache) || !make_dir(logs)) {
             show_error([NSString stringWithFormat:@"Cannot create %@.", data]);
             return 1;
         }
         pid_t running = running_game(slot);
         if (running) {
+            char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+            proc_pidpath(running, path, sizeof path);
+            if (strcmp(path, binary.fileSystemRepresentation)) {
+                show_error(@"Another game is running. Close it before opening this game.");
+                return 1;
+            }
             [[NSRunningApplication runningApplicationWithProcessIdentifier:running] activateWithOptions:NSApplicationActivateAllWindows];
             return 0;
         }
 #if defined(TOTK_GAME_V112) || defined(TOTK_GAME_V121) || defined(TOTK_GAME_V143)
-        NSString *backup = [profile stringByAppendingFormat:@"-before-%s", TOTK_GAME_VERSION];
+        NSString *backup = [data stringByAppendingPathComponent:[NSString stringWithFormat:@"Backups/before-%s", TOTK_GAME_VERSION]];
         NSFileManager *fm = NSFileManager.defaultManager;
         if (![fm fileExistsAtPath:backup]) {
             NSString *temporary = [backup stringByAppendingFormat:@".copy-%d", getpid()];
             NSError *error = nil;
-            if (![fm copyItemAtPath:profile toPath:temporary error:&error] ||
+            if (![fm createDirectoryAtPath:temporary withIntermediateDirectories:YES attributes:nil error:&error] ||
+                ![fm copyItemAtPath:profile toPath:[temporary stringByAppendingPathComponent:@"Settings"] error:&error] ||
+                ![fm copyItemAtPath:saves toPath:[temporary stringByAppendingPathComponent:@"Saves"] error:&error] ||
                 ![fm moveItemAtPath:temporary toPath:backup error:&error]) {
                 [fm removeItemAtPath:temporary error:nil];
                 show_error([@"Cannot back up saves before upgrading: " stringByAppendingString:error.localizedDescription ?: @"unknown error"]);
@@ -145,7 +159,7 @@ int main(int argc, char **argv) {
         }
         /* The player's controller layout (runtime/controller_map.h), checked here: a bad line shows this alert instead of
            the game closing at start. */
-        NSString *controls = env_or("TOTK_CONTROLS", [data stringByAppendingPathComponent:@"controls.txt"]);
+        NSString *controls = env_or("TOTK_CONTROLS", [profile stringByAppendingPathComponent:@"controls.txt"]);
         NSData *layout = [NSData dataWithContentsOfFile:controls];
         if (layout) {
             NSString *text = layout.length < 16384 ? [[NSString alloc] initWithData:layout encoding:NSUTF8StringEncoding] : nil;
@@ -158,10 +172,14 @@ int main(int argc, char **argv) {
         setenv("TOTK_PROFILE_DIR", profile.fileSystemRepresentation, 1);
         setenv("TOTK_SHADER_CACHE", cache.fileSystemRepresentation, 1);
         setenv("TOTK_GAME_SLOT_DIR", slot.fileSystemRepresentation, 1);
-        setenv("TOTK_ROMFS_PROOF_DIR", data.fileSystemRepresentation, 1);   // the app bundle stays read-only
+        setenv("TOTK_ROMFS_PROOF_DIR", [data stringByAppendingPathComponent:@"Cache"].fileSystemRepresentation, 1);
+        setenv("NSW_SAVES_DIR", saves.fileSystemRepresentation, 1);
+        setenv("NSW_STORAGE_DIR", storage.fileSystemRepresentation, 1);
+        setenv("NSW_SCREENSHOTS_DIR", env_or("NSW_SCREENSHOTS_DIR", [data stringByAppendingPathComponent:@"Screenshots"]).fileSystemRepresentation, 1);
+        setenv("DM_PSO_USER", env_or("DM_PSO_USER", [data stringByAppendingPathComponent:@"Shaders Cache/pso_user.tsv"]).fileSystemRepresentation, 1);   // the app bundle stays read-only
         setenv("TOTK_SHARED_FONTS", "extracted/firmware/shared-fonts", 1);
         /* Player mods (runtime/romfs.c): <data>/mods/<version>/manifest.tsv, when present. */
-        setenv("TOTK_ROMFS_MODS", [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR].fileSystemRepresentation, 0);
+        setenv("TOTK_ROMFS_MODS", [data stringByAppendingPathComponent:@"Mods/" TOTK_GAME_DIR].fileSystemRepresentation, 0);
         /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
            language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
         NSString *preferred = NSLocale.preferredLanguages.firstObject;
@@ -171,20 +189,27 @@ int main(int argc, char **argv) {
         setenv("TOTK_GPU_BLOCKRT", "1", 1);
         setenv("TOTK_GPU_MIDCLEAR", "1", 1);
         setenv("TOTK_GPU_BUDGET_MB", "5000", 1);
+#ifdef NSW_GAME_BOTW
+        setenv("TOTK_ROMFS_PATCHES", "0", 1);
+        setenv("TOTK_OUTPUT_RES", "0", 1);
+        setenv("TOTK_OPERATION_MODE", "handheld", 0);
+#endif
         setenv("TOTK_SLOT_OWNER", "user", 0);
         setenv("TOTK_SLOT_PURPOSE", "player", 0);
         NSString *contrib = env_or("TOTK_SHADER_CONTRIB", [data stringByAppendingPathComponent:@"shader-list-contribution.txt"]);
         setenv("TOTK_SHADER_CONTRIB", contrib.fileSystemRepresentation, 1);
+#ifndef NSW_GAME_BOTW
         contrib_reminder(contrib);
+#endif
         unsetenv("TOTK_AUTOLOAD");   // the game starts at its title screen, as on the console
         /* runtime command channel (runtime/input.c): echo "shot ~/Desktop/shot.png" >> "<data>/input.txt" */
-        { NSString *cmds = env_or("TOTK_INPUT_FILE", [data stringByAppendingPathComponent:@"input.txt"]);
+        { NSString *cmds = env_or("TOTK_INPUT_FILE", [data stringByAppendingPathComponent:@"Cache/input.txt"]);
           FILE *cf = fopen(cmds.fileSystemRepresentation, "w"); if (cf) fclose(cf);
           setenv("TOTK_INPUT_FILE", cmds.fileSystemRepresentation, 1); }
 
-        NSString *log = [logs stringByAppendingPathComponent:@"totk.log"];
-        [NSFileManager.defaultManager removeItemAtPath:[logs stringByAppendingPathComponent:@"totk.previous.log"] error:nil];
-        [NSFileManager.defaultManager moveItemAtPath:log toPath:[logs stringByAppendingPathComponent:@"totk.previous.log"] error:nil];
+        NSString *log = [logs stringByAppendingPathComponent:@"game.log"];
+        [NSFileManager.defaultManager removeItemAtPath:[logs stringByAppendingPathComponent:@"game.previous.log"] error:nil];
+        [NSFileManager.defaultManager moveItemAtPath:log toPath:[logs stringByAppendingPathComponent:@"game.previous.log"] error:nil];
         FILE *lf = fopen(log.fileSystemRepresentation, "w");
         if (lf) {
             dup2(fileno(lf), STDOUT_FILENO);

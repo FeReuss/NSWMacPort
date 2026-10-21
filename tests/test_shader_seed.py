@@ -166,6 +166,38 @@ int main(int argc, const char **argv) { @autoreleasepool {
             (source/(variant+'_b.metal')).write_text('corrupt')   # only a check of the sources would notice
             self.assertEqual(self.run_probe(source, cache)['imported_files'], 0)
 
+    def test_reprepared_seed_updates_depth_metadata_without_losing_user_variants(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            self.run_probe(source, cache)
+            index = cache/(key+'.variants')
+            user = dict(variant=key+'-'+'c'*12, deps={})
+            index.write_text(json.dumps(json.loads(index.read_text()) + [user]))
+            row = dict(variant=variant, deps={}, depth_minus_w=True)
+            name = key+'.variants'
+            (source/name).write_text(json.dumps([row]))
+            manifest = source/'seed-manifest.json'
+            m = json.loads(manifest.read_text())
+            m['files'][name] = hashlib.sha256((source/name).read_bytes()).hexdigest()
+            manifest.write_text(json.dumps(m))
+            self.run_probe(source, cache)
+            self.assertEqual(json.loads(index.read_text()), [row, user])
+
+    def test_alternating_seeds_stay_installed(self):
+        # BOTW: the app's seed and build_shaders.py's complete one share one cache; neither may evict the other's receipt.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app, cache, key, variant = self.fixture(root)
+            complete = root/'complete'; shutil.copytree(app, complete)
+            m = json.loads((complete/'seed-manifest.json').read_text())
+            extra = key+'-'+'e'*12+'_b.metal'
+            (complete/extra).write_bytes(b'// extended'); m['files'][extra] = hashlib.sha256(b'// extended').hexdigest()
+            (complete/'seed-manifest.json').write_text(json.dumps(m))
+            self.run_probe(app, cache); self.run_probe(complete, cache)
+            (app/(variant+'_b.metal')).write_text('corrupt')   # a full check would reject this: the receipt must skip it
+            self.assertEqual(self.run_probe(app, cache)['imported_files'], 0)
+            self.assertIn(json.loads((cache/'seed-installed.json').read_text())['files_sha256'], json.loads((cache/'seed-installed.json').read_text())['installed'])
+
     def test_a_changed_file_table_is_checked_again(self):
         with tempfile.TemporaryDirectory() as folder:
             source, cache, key, variant = self.fixture(Path(folder))

@@ -138,3 +138,18 @@
 #define GAME_ADDR_0x8f6cbc 0x8f6cbc
 #define GAME_OUTPUT_CALL_WORD 0x94000082u
 #endif
+
+/* Game identity shared by the launcher and host services; generated game data stays local. */
+#ifdef NSW_GAME_BOTW
+#undef TOTK_GAME_VERSION
+#define TOTK_GAME_VERSION "1.9.0"
+#define NSW_GAME_FAMILY "BOTW"
+#define NSW_GAME_FOLDER "Breath of the Wild"
+#define NSW_RESOURCE_DIR "botw"
+#define NSW_APPLICATION_ID 0x01007ef00011e000ULL
+#else
+#define NSW_GAME_FAMILY "TOTK"
+#define NSW_GAME_FOLDER "Tears of the Kingdom"
+#define NSW_RESOURCE_DIR "totk"
+#define NSW_APPLICATION_ID 0x0100f2c0115b6000ULL
+#endif

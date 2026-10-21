@@ -98,6 +98,11 @@ static uint32_t six_start(const uint32_t *h) {
     runtime_motion_start(); return 0;
 }
 static uint32_t six_stop(const uint32_t *h) { six_axis_check(h); return 0; }
+static void six_zero_drift(const uint32_t *h, const uint32_t *mode) {
+    six_axis_check(h);
+    if (!mode || *mode > 2) runtime_fail("gyroscope zero-drift mode");
+    /* shortcut: host motion fusion owns calibration; add distinct Switch drift modes when motion tests require them. */
+}
 /* Newest first, like the hid service's ring. No motion (no controller with sensors, or muted): one state of a controller
    lying still, not marked connected. */
 static uint32_t six_states(int *out, SixAxisState *s, int max, const uint32_t *h) {
@@ -133,7 +138,35 @@ int runtime_hid_feedback_flag(const char *name, int v) {
 }
 void runtime_hid_feedback_stats(uint64_t *values, uint64_t *motion_reads) { *values = atomic_load(&values_in); *motion_reads = atomic_load(&reads); }
 
+/* shortcut: macOS has no Switch-console seven-axis device; return no samples until a console-motion provider exists.
+   Controller six-axis motion above remains independent. The SDK requires a 0x80000-byte, page-aligned work buffer. */
+static _Atomic bool seven_initialized;
+static void seven_check(void) { if (!atomic_load(&seven_initialized)) runtime_fail("console sensor used before initialization"); }
+static void seven_initialize(void *work, size_t size) {
+    if (!work || (uintptr_t)work % 0x1000 || size < 0x80000) runtime_fail("console sensor work buffer");
+    if (atomic_exchange(&seven_initialized, true)) runtime_fail("console sensor already initialized");
+    fprintf(stderr, "[hid] Switch-console motion unavailable on macOS; no seven-axis samples\n");
+}
+static void seven_finalize(void) { seven_check(); atomic_store(&seven_initialized, false); }
+static int seven_states(void *out, int max) {
+    seven_check();
+    if (max < 0 || (max && !out)) runtime_fail("console sensor state output");
+    return 0;
+}
+
 void *runtime_hid_feedback_override(const char *name) {
+    if (!strcmp(name, "_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE"))
+        return six_zero_drift;
+    static const struct { const char *name; void *fn; } console[] = {
+        {"_ZN2nn3hid28InitializeSevenSixAxisSensorEPvm", seven_initialize},
+        {"_ZN2nn3hid26FinalizeSevenSixAxisSensorEv", seven_finalize},
+        {"_ZN2nn3hid23StartSevenSixAxisSensorEv", seven_check},
+        {"_ZN2nn3hid22StopSevenSixAxisSensorEv", seven_check},
+        {"_ZN2nn3hid32ResetSevenSixAxisSensorTimestampEv", seven_check},
+        {"_ZN2nn3hid27GetSevenSixAxisSensorStatesEPNS0_23SevenSixAxisSensorStateEi", seven_states},
+    };
+    for (unsigned i = 0; i < sizeof console / sizeof *console; i++)
+        if (!strcmp(name, console[i].name)) return console[i].fn;
     const bool rumble = runtime_rumble_enabled(), gyro = runtime_gyro_enabled();
     if (!strcmp(name, "_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE"))
         return rumble ? NULL : (void *)no_handles;   /* on: the SDK's own (nn::hid::utility) */

@@ -10,14 +10,18 @@ data and belongs in the work folder, never in the repo.
 import argparse
 import concurrent.futures
 import hashlib
+import inspect
+import itertools
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -72,7 +76,21 @@ def sarc(data):
     return result
 
 
-def bnsh_shaders(data):
+def _short_control_size(control):
+    if len(control) < 36:
+        return None
+    h = struct.unpack_from('<9I', control)
+    if h[:2] != (0x98761234, 1) or h[3:5] != (0x120, 11) or h[7] or h[8] != len(control):
+        return None
+    # Format 9 appends reflection after its 0x7d1-byte control; reflection can contain relocated pointers.
+    if h[2] == 9 and h[5] == 0x7d0 and h[8] == 0x7d1 + h[6]:
+        return 0x7d1
+    if h[2] == 14 and not h[5] and not h[6] and h[8] == 0x848:
+        return 0x848
+    return None
+
+
+def bnsh_shaders(data, *, short_control=False):
     """BNSH absolute offsets are relative to each embedded BNSH, not BFSHA."""
     if data[:4] != b'BNSH' or checked(data, 12, 2) != b'\xff\xfe' or checked(data, 96, 4) != b'grsc':
         raise ValueError('unsupported BNSH header')
@@ -90,11 +108,15 @@ def bnsh_shaders(data):
             control_off, code_off, code_size, control_size = struct.unpack_from('<QQII', checked(data, offset+8, 24))
             control = checked(data, control_off, control_size)
             code = checked(data, code_off, code_size)
-            if len(control) < 0x880:
-                # The SDK utility BNSH uses an older, shorter control layout.
-                # Do not invent bytes to make it look like the game's NVN ABI.
+            if short_control:
+                canonical_size = _short_control_size(control)
+                if canonical_size is None:
+                    raise ValueError('unsupported short NVN shader control')
+                control = control[:canonical_size]
+            elif len(control) < 0x880:
                 continue
-            control = control[:0x880]   # some are 0x88c; NVN and the runtime's key read 0x880
+            else:
+                control = control[:0x880]   # some are 0x88c; TOTK and its runtime key read 0x880
             c1, length = struct.unpack_from('<II', control, 0x700)
             actual = struct.unpack_from('<I', control, 0x714)[0]
             if actual != {'vs': 0, 'ps': 1, 'cs': 5}[stage] or not 0 <= c1 <= length <= len(code) or not length:
@@ -103,17 +125,27 @@ def bnsh_shaders(data):
             yield digest(control+code), stage, control, code
 
 
-def sharcb_shaders(data):
+def sharcb_shaders(data, *, short_control=False):
     """agl shader packages (.sharcb, magic BAHS): the records between the header's start and the code pool are
-    <u64 code offset in the pool, u32 control size (0x880 or 0x88c), i32 offset of the control from the record>; a record
-    may reuse an earlier record's control. Control (its first 0x880 bytes) and code hash to the runtime's key."""
+    <u64 code offset in the pool, u32 control size, i32 offset of the control from the record>; a record may reuse an
+    earlier record's control. TOTK hashes its first 0x880 control bytes; BOTW omits appended reflection."""
     if len(data) < 32 or data[:4] != b'BAHS':
         raise ValueError('expected an agl shader package')
     start, pool_size, pool = struct.unpack_from('<3I', data, 20)
     if not 32 <= start <= pool or pool + pool_size > len(data):
         raise ValueError('agl shader package layout outside the file')
     seen = set()
-    for size in (b'\x80\x08\x00\x00', b'\x8c\x08\x00\x00'):
+    sizes = (0x880, 0x88c)
+    if short_control:
+        sizes, at = set(), start
+        while (at := data.find(b'\x34\x12\x76\x98', at, pool)) >= 0:
+            if at + 36 <= pool:
+                size = struct.unpack_from('<I', data, at + 32)[0]
+                if 36 <= size <= pool - at and _short_control_size(data[at:at+size]) is not None:
+                    sizes.add(size)
+            at += 4
+    for control_size in sorted(sizes):
+        size = struct.pack('<I', control_size)
         at = start
         while (at := data.find(size, at, pool)) >= 0:
             record, at = at - 8, at + 4
@@ -121,9 +153,15 @@ def sharcb_shaders(data):
                 continue
             code_off = struct.unpack_from('<Q', data, record)[0]
             control_at = record + struct.unpack_from('<i', data, record+12)[0]
-            if not start <= control_at <= pool - 0x880 or code_off >= pool_size:
+            length = control_size if short_control else min(control_size, 0x880)
+            if not start <= control_at <= pool - length or code_off >= pool_size:
                 continue
-            control = data[control_at:control_at+0x880]
+            control = data[control_at:control_at+length]
+            if short_control:
+                canonical_size = _short_control_size(control)
+                if canonical_size is None:
+                    continue
+                control = control[:canonical_size]
             c1, length = struct.unpack_from('<II', control, 0x700)
             stage = {0: 'vs', 1: 'ps', 5: 'cs'}.get(struct.unpack_from('<I', control, 0x714)[0])
             if not stage or not 0 < length <= pool_size - code_off or c1 > length:
@@ -284,122 +322,336 @@ def plan(shaders, startup, listed):
     return jobs
 
 
-def prepare(romfs, output, translator, spirv_cross, version, shader_list=LIST, modules=None):
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_json(path, value, sync_directory=True):
+    """Durable data; the directory entry is synced only where nothing else checks it. Receipts and staging indexes
+    skip that (a directory fsync each in folders of ~300,000 entries cost minutes per run): the next run verifies them
+    by hash, and publication syncs the staging folder once with the manifest."""
+    temporary = path.with_name(path.name+'.tmp')
+    with temporary.open('w') as stream:
+        json.dump(value, stream, sort_keys=True, separators=(',', ':'))
+        stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+    temporary.replace(path)
+    if sync_directory:
+        _sync_directory(path.parent)
+
+
+def prepare(romfs, output, translator, spirv_cross, version, shader_list=LIST, modules=None, *,
+            inventory_fn=inventory, minimum_shaders=MIN_SHADERS, chain=CHAIN, variant_planner=None, extra_identity=None):
+    """Resume verified requests; variant_planner(key, stage, default_reflection) lazily adds answer dictionaries."""
     shared = ShaderList.load(shader_list)
     listed = shared.variants
-    identity = dict(schema=1, chain=CHAIN, version=version,
+    identity = dict(schema=1, chain=chain, version=version,
                     source_romfs_sha256=json.loads((romfs/'index.json').read_text())['romfs_sha256'],
                     translator_sha256=digest(translator.read_bytes()),
                     spirv_cross_sha256=digest(spirv_cross.read_bytes()),
                     preparation_sha256=digest(Path(__file__).read_bytes()),
+                    inventory_sha256=digest(Path(inspect.getsourcefile(inventory_fn)).read_bytes()),
+                    variant_planner_sha256=digest(Path(inspect.getsourcefile(variant_planner)).read_bytes()) if variant_planner else None,
+                    **({'variant_planner': variant_planner.__name__} if variant_planner else {}),   # one file, two coverage modes
                     shader_list_sha256=digest(Path(shader_list).read_bytes()) if Path(shader_list).is_file() else None)
+    identity.update(extra_identity or {})   # inputs the inventory reads besides the RomFS (BOTW: the DLC image)
+    previous = output.with_name(output.name+'.previous')
+    if previous.exists() and not output.exists():
+        previous.rename(output)   # Recover a kill between the two publication renames.
     marker = output/'seed-manifest.json'
+    old = {}
     if marker.exists():
-        old = json.loads(marker.read_text())
-        if all(old.get(k) == v for k, v in identity.items()) and old.get('shaders', 0) >= MIN_SHADERS and all(
-                (output/name).is_file() and digest((output/name).read_bytes()) == sha for name, sha in old['files'].items()):
-            print(f'reusing {old["shaders"]} verified prepared startup shaders', flush=True)
-            return old
+        try:
+            old = json.loads(marker.read_text())
+            if all(old.get(k) == v for k, v in identity.items()) and old.get('shaders', 0) >= minimum_shaders and all(
+                    Path(name).name == name and digest((output/name).read_bytes()) == sha for name, sha in old['files'].items()):
+                print(f'reusing {old["shaders"]} verified prepared startup shaders', flush=True)
+                return old
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            old = {}
+    producer = {name: identity[name] for name in ('chain', 'version', 'translator_sha256', 'spirv_cross_sha256')}
+    legacy = old if all(old.get(name) == identity[name] for name in (*producer, 'source_romfs_sha256')) else {}
     staging = output.with_name(output.name+'.partial')
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    _, shaders, startup, archives = inventory(romfs, modules)
-    extra = located({where for where in shared.locators if where[0] not in shaders}, source_reader(romfs, modules))
+    staging.mkdir(parents=True, exist_ok=True)
+    checkpoints = output.with_name(output.name+'.checkpoints')
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    _, shaders, startup, archives = inventory_fn(romfs, modules)
+    locators = {where for where in shared.locators if where[0] not in shaders}
+    extra = located(locators, source_reader(romfs, modules)) if locators else {}
     shaders.update(extra)
     print(f'{len(extra)} more shaders read where the shared list locates them (agl .sharcb, game module)', flush=True)
     jobs = plan(shaders, startup, listed)
-    # One translator service per core. A shader's jobs (its default bind state, then its listed ones) run in order on
-    # one service, because whether a listed job is translated and kept depends on that shader's earlier results; the
-    # files each job writes are named after its own shader. The results are then taken in the order of `jobs`, so the
-    # output is the same as translating everything one at a time.
+    # Receipts commit individual requests; expanding a plan never invalidates an already verified translation.
     by_key = {}
-    for index, job in enumerate(jobs):
-        by_key.setdefault(job[0], []).append(index)
-    outcome = [None]*len(jobs)   # ('ok', variant, rows) / ('failed', record) / None (skipped or a duplicate of deps)
-    produced = {}   # key -> {canonical deps: variant}; a shader's .variants rows
+    for job in jobs:
+        by_key.setdefault(job[0], []).append(job)
+    outcome, produced = {}, {}
     lock = threading.Lock()
     pending = iter(by_key.items())
     done = [0, 0]   # completed, failed
-    stop = threading.Event()   # a service failed: the others stop after their current shader
+    stop = threading.Event()
+    processes = set()
+    resumed = [0]
+    asked = set()   # every variant this run requested: the receipts worth keeping
     started = time.monotonic()
 
+    def cancel():
+        stop.set()
+        with lock:
+            active = list(processes)
+        for process in active:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        for process in active:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)   # A compiler descendant can outlive its service parent.
+            except ProcessLookupError:
+                pass
+
+    def semantic_deps(deps, stage, clip):
+        return json.dumps([deps, clip if stage == 'vs' else None], sort_keys=True, separators=(',', ':'))
+
+    def entry_hash(entry):
+        return digest(json.dumps(entry, sort_keys=True, separators=(',', ':')).encode())
+
+    def reflection_at(folder, variant, stage):
+        reflection = json.loads((folder/(variant+'_b.json')).read_text())
+        if reflection['chain'] != chain or reflection['stage'] != stage or not isinstance(reflection['deps'], dict):
+            raise ValueError('prepared shader identity mismatch')
+        return reflection
+
+    def commit_variant(variant, fingerprint, entry):
+        names = [entry['variant']+'_b.metal', entry['variant']+'_b.json']
+        for name in names:
+            with (staging/name).open('rb') as stream:
+                if not stream.read(1):
+                    raise ValueError('empty prepared shader payload')
+                os.fsync(stream.fileno())
+        _write_json(checkpoints/(variant+'.json'), dict(request_sha256=fingerprint, entry=entry,
+                    index_row_sha256=entry_hash(entry), files={name: digest((staging/name).read_bytes()) for name in names}), sync_directory=False)
+
+    def restore_files(names, folder):
+        # A hard link: published files are only ever replaced by rename, never rewritten, so the published seed and the
+        # next one can share them (BOTW's complete seed: ~294,000 copies took minutes on every identity change).
+        # One link straight to the final name: the name appears pointing at a complete file, and each extra rename or
+        # unlink in the 300,000-entry folder was most of a resume (sampled, 2026-10-21).
+        if folder != staging:
+            for name in names:
+                try:
+                    try:
+                        os.link(folder/name, staging/name)
+                    except FileExistsError:   # left by an interrupted run, unverified: replace it
+                        (staging/name).unlink()
+                        os.link(folder/name, staging/name)
+                except OSError:   # another volume or no hard links: a durable copy, as before
+                    temporary = staging/(name+'.restore')
+                    shutil.copyfile(folder/name, temporary)
+                    with temporary.open('rb') as stream:
+                        os.fsync(stream.fileno())
+                    temporary.replace(staging/name)
+            # No directory fsync per restore (147,000 of a 300,000-entry folder took minutes): publication writes the
+            # manifest with _write_json, whose directory fsync makes every entry durable, and a crash before that only
+            # leaves a staging folder the next run checks file by file against the receipts.
+
+    def resumed_variant(key, variant, fingerprint, stage, clip):
+        names = {variant+'_b.metal', variant+'_b.json'}
+        try:
+            receipt = json.loads((checkpoints/(variant+'.json')).read_text())
+            entry = receipt['entry']
+            canonical = entry['variant']
+            cached_names = {canonical+'_b.metal', canonical+'_b.json'}
+            if (receipt['request_sha256'] == fingerprint and receipt['index_row_sha256'] == entry_hash(entry) and
+                    canonical.startswith(key+'-') and all(Path(name).name == name for name in cached_names) and
+                    set(receipt['files']) == cached_names):
+                for folder in (staging, output):
+                    if not all((folder/name).is_file() and digest((folder/name).read_bytes()) == sha for name, sha in receipt['files'].items()):
+                        continue
+                    reflection = reflection_at(folder, canonical, stage)
+                    if entry == dict(variant=canonical, deps=reflection['deps'], **({'depth_minus_w': clip} if stage == 'vs' else {})):
+                        restore_files(cached_names, folder)
+                        return reflection, entry
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        # Older complete seeds have no receipts. Their hash-verified pair and index bootstrap the same request.
+        try:
+            files = legacy['files']
+            if any(digest((output/name).read_bytes()) != files[name] for name in names | {key+'.variants'}):
+                return None
+            entries = json.loads((output/(key+'.variants')).read_text())
+            reflection = reflection_at(output, variant, stage)
+            entry = dict(variant=variant, deps=reflection['deps'], **({'depth_minus_w': clip} if stage == 'vs' else {}))
+            if entry not in entries:
+                return None
+            restore_files(names, output)
+            commit_variant(variant, fingerprint, entry)
+            return reflection, entry
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def worker():
-        process = subprocess.Popen([str(translator), '--service', '--spirv-cross', str(spirv_cross),
-                                    '--out', str(staging), '--chain', CHAIN],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        process = None
+        # A service orphaned by SIGKILL can only finish in its private directory, never overwrite resumed payloads.
+        scratch = tempfile.TemporaryDirectory(prefix='translation-', dir=checkpoints)
+        work = Path(scratch.name)
         try:
             while not stop.is_set():
                 with lock:
                     item = next(pending, None)
                 if item is None:
                     return
-                key, indices = item
-                mine = {}
-                for index in indices:
-                    _, answers, variant, why = jobs[index]
-                    stage, control, code, source = shaders[key]
-                    if why == 'listed' and json.dumps(answers, sort_keys=True, separators=(',', ':')) in mine:
+                key, group = item
+                stage, control, code, source = shaders[key]
+                shader_identity = dict(producer, stage=stage, control_sha256=digest(control), code_sha256=digest(code))
+                mine, results, requested = {}, [], set()
+                default_reflection = None
+                def expanded_jobs():
+                    if variant_planner and default_reflection is not None:
+                        for more in variant_planner(key, stage, default_reflection):
+                            more = {**ANSWERS, **more}
+                            yield key, more, key+'-'+suffix(more), 'expanded'
+                for _, answers, variant, why in itertools.chain(group, expanded_jobs()):
+                    if stop.is_set():
+                        return
+                    clip = bool(answers.get('depth_minus_w', True))
+                    dependencies = {name: value for name, value in answers.items() if name != 'depth_minus_w'}
+                    answer_id = semantic_deps(dependencies, stage, clip)
+                    if answer_id in requested or answer_id in mine:
                         continue   # the default (or an earlier row) already gave exactly these deps
+                    requested.add(answer_id)
+                    with lock:
+                        asked.add(variant)
+                    fingerprint = digest(json.dumps(dict(shader_identity, answers=dependencies, depth_minus_w=clip),
+                                                    sort_keys=True, separators=(',', ':')).encode())
+                    cached = resumed_variant(key, variant, fingerprint, stage, clip)
+                    if cached:
+                        refl, entry = cached
+                        with lock:
+                            resumed[0] += 1
+                    else:
+                        if process is None:
+                            process = subprocess.Popen([str(translator), '--service', '--spirv-cross', str(spirv_cross),
+                                                        '--out', str(work), '--chain', chain],
+                                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+                            with lock:
+                                processes.add(process)
+                            if stop.is_set():
+                                cancel(); return
+                        for name in (variant+'_b.metal', variant+'_b.json'):
+                            (work/name).unlink(missing_ok=True)
                     c1, length = struct.unpack_from('<II', control, 0x700)
-                    code_path = staging/(variant+'.code')
-                    code_path.write_bytes(code[0 if stage == 'cs' else 0x30:length])
+                    code_path = work/(variant+'.code')
                     request = dict(variant=variant, stage=stage, code=str(code_path.resolve()),
-                                   c1=code[c1:length].hex(), depth_minus_w=True, **answers)
+                                   c1=code[c1:length].hex(), **answers)
+                    request.setdefault('depth_minus_w', True)
                     if stage == 'cs':
                         request['local'] = list(struct.unpack_from('<III', control, 0x748))
-                    process.stdin.write(json.dumps(request)+'\n'); process.stdin.flush()
-                    response = process.stdout.readline()
-                    if not response:
-                        raise ValueError('shader preparation service exited unexpectedly')
-                    reply = json.loads(response)
-                    code_path.unlink()
-                    if reply.get('ok'):
-                        refl = json.loads((staging/(variant+'_b.json')).read_text())
-                        if refl['chain'] != CHAIN or refl['stage'] != stage:
-                            raise ValueError('prepared shader identity mismatch')
-                        deps = json.dumps(refl['deps'], sort_keys=True, separators=(',', ':'))
-                        if deps in mine:   # same deps as a variant already made: keep one
-                            for name in (variant+'_b.metal', variant+'_b.json'):
-                                (staging/name).unlink(missing_ok=True)
-                            continue
-                        mine[deps] = variant
-                        (staging/(key+'.variants')).write_text(json.dumps([dict(variant=v, deps=json.loads(d)) for d, v in
-                                                                           mine.items()], separators=(',', ':'))+'\n')
-                        rows = [f'S\t{variant}_b\t'+str({'vs': 0, 'ps': 1, 'cs': 5}[stage])]
-                        if stage == 'cs':
-                            rows.append(f'C\t{variant}_b')
-                        outcome[index] = ('ok', variant, rows)
+                    if cached:
+                        reply = {'ok': True}
                     else:
-                        outcome[index] = ('failed', dict(key=key, variant=variant, why=why, stage=stage, source=source,
-                                                         error=reply.get('error')))
+                        code_path.write_bytes(code[0 if stage == 'cs' else 0x30:length])
+                        process.stdin.write(json.dumps(request)+'\n'); process.stdin.flush()
+                        response = process.stdout.readline()
+                        if not response:
+                            raise ValueError('shader preparation service exited unexpectedly')
+                        reply = json.loads(response)
+                        for scratch_file in work.glob(variant+'.*'):   # .code, .spv, .res.json: ~25 KB a request until exit otherwise
+                            scratch_file.unlink()
+                    if reply.get('ok'):
+                        if not cached:
+                            refl = reflection_at(work, variant, stage)
+                        if why == 'default':
+                            default_reflection = refl
+                        deps = semantic_deps(refl['deps'], stage, clip)
+                        if deps in mine:   # same deps as a variant already made: keep one
+                            if not cached:
+                                commit_variant(variant, fingerprint, mine[deps])
+                                for name in (variant+'_b.metal', variant+'_b.json'):
+                                    (work/name).unlink(missing_ok=True)
+                            continue
+                        if not cached:
+                            entry = dict(variant=variant, deps=refl['deps'], **({'depth_minus_w': clip} if stage == 'vs' else {}))
+                            for name in (variant+'_b.metal', variant+'_b.json'):
+                                (work/name).replace(staging/name)
+                            commit_variant(variant, fingerprint, entry)
+                        mine[deps] = entry
+                        emitted = entry['variant']
+                        rows = [f'S\t{emitted}_b\t'+str({'vs': 0, 'ps': 1, 'cs': 5}[stage])]
+                        if stage == 'cs':
+                            rows.append(f'C\t{emitted}_b')
+                        results.append(dict(status='ok', variant=emitted, rows=rows, why=why))
+                    else:
+                        results.append(dict(status='failed', key=key, variant=variant, why=why, stage=stage, source=source,
+                                            error=reply.get('error')))
                     with lock:
                         done[0 if reply.get('ok') else 1] += 1
                         if sum(done) % 100 == 0:
-                            print(f'prepared {done[0]}/{len(jobs)}, skipped {done[1]}; {time.monotonic()-started:.1f}s', flush=True)
-                if mine:
-                    with lock:
-                        produced[key] = mine
+                            print(f'prepared {done[0]} shader variants, skipped {done[1]}; {time.monotonic()-started:.1f}s', flush=True)
+                entries = list(mine.values())
+                if entries:
+                    _write_json(staging/(key+'.variants'), entries, sync_directory=False)
+                with lock:
+                    outcome[key] = results
+                    if entries:
+                        produced[key] = entries
         except BaseException:
-            stop.set()
+            cancel()
             raise
         finally:
-            process.stdin.close(); process.wait()
+            if process is not None:
+                try:
+                    process.stdin.close()
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+                process.stdout.close()
+                with lock:
+                    processes.discard(process)
+            scratch.cleanup()
 
     # At most 8 services, as compile_seed.py compiles: each translator holds its own working memory.
     workers = max(1, min(8, os.cpu_count() or 4, len(by_key)))
-    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        for future in [pool.submit(worker) for _ in range(workers)]:
+    pool = concurrent.futures.ThreadPoolExecutor(workers)
+    handlers = {}
+    def interrupted(number, _frame):
+        if not stop.is_set():
+            stop.set()
+            raise KeyboardInterrupt(f'shader preparation interrupted by signal {number}')
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for number in (signal.SIGINT, signal.SIGTERM):
+                handlers[number] = signal.signal(number, interrupted)
+        for future in concurrent.futures.as_completed([pool.submit(worker) for _ in range(workers)]):
             future.result()
+    except BaseException:
+        cancel()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
     failed, rows, completed = [], [], []
-    for result in outcome:
-        if result and result[0] == 'ok':
-            completed.append(result[1]); rows.extend(result[2])
-        elif result:
-            failed.append(result[1])
+    results = [result for key in by_key for result in outcome.get(key, [])]
+    for result in results:
+        if result['status'] == 'ok':
+            completed.append(result['variant']); rows.extend(result['rows'])
+        else:
+            failed.append(result)
     ready = sum(1 for key in startup if key in produced)
-    if ready < MIN_SHADERS:
-        raise ValueError(f'only {ready} shaders prepared; at least {MIN_SHADERS} are required for first-launch warm-up')
+    if ready < minimum_shaders:
+        raise ValueError(f'only {ready} shaders prepared; at least {minimum_shaders} are required for first-launch warm-up')
     # Only ship completed runtime inputs. Failed translations can leave MSL
     # behind before publishing reflection; those must not become cached shaders.
     wanted = set()
@@ -408,15 +660,36 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=LIST, m
     for p in staging.iterdir():
         if p.name not in wanted:
             p.unlink()
-    (staging/'pso_manifest.tsv').write_text('# Prepared from this app\'s local game data; '+CHAIN+'\n'+'\n'.join(rows)+'\n')
+    with (staging/'pso_manifest.tsv').open('w') as stream:
+        stream.write('# Prepared from this app\'s local game data; '+chain+'\n'+'\n'.join(rows)+'\n')
+        stream.flush(); os.fsync(stream.fileno())
     report = dict(**identity, shaders=len(completed), discovered=len(shaders), located=len(extra), startup_shaders=ready,
                   listed_variants=sum(1 for _, _, _, why in jobs if why == 'listed'), skipped=failed,
+                  expanded_variants=sum(result['why'] == 'expanded' for result in results), resumed_variants=resumed[0],
                   archives=archives, seconds=time.monotonic()-started,
                   files={p.name: digest(p.read_bytes()) for p in sorted(staging.iterdir())})
-    (staging/'seed-manifest.json').write_text(json.dumps(report, indent=2)+'\n')
-    if output.exists():
-        shutil.rmtree(output)
-    staging.rename(output)
+    _write_json(staging/'seed-manifest.json', report)
+    if previous.exists():
+        shutil.rmtree(previous)
+    try:
+        if output.exists():
+            output.rename(previous)
+        staging.rename(output)
+        _sync_directory(output.parent)
+    except BaseException:
+        if previous.exists() and not output.exists():
+            previous.rename(output)
+        raise
+    if previous.exists():
+        shutil.rmtree(previous)
+    # Receipts of variants this plan no longer requests only grow the folder (BOTW: 147,022 receipts, 574 MB, for a
+    # bounded plan of ~26,000); a variant requested again later is translated again. Pruned only after publication.
+    pruned = 0
+    for receipt in checkpoints.glob('*.json'):
+        if receipt.stem not in asked:
+            receipt.unlink(missing_ok=True); pruned += 1
+    if pruned:
+        print(f'{pruned} receipts of variants this plan no longer requests removed', flush=True)
     print(f'startup seed ready: {len(completed)} shader variants ({ready} startup shaders, the rest from the shared list), '
           f'{len(failed)} skipped', flush=True)
     return report

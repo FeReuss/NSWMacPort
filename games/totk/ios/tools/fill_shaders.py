@@ -23,8 +23,8 @@ MAX_CODE = 16 << 20   # the runtime's own limit on a shader's code area
 
 def chain():
     for line in (TOTK/'third_party/d2r_gfx/gfx/nvn/dmsh_chain.h').read_text().splitlines():
-        if line.startswith('#define DMSH_CHAIN'): return line.split('"')[1]
-    raise RuntimeError('DMSH_CHAIN not found')
+        if line.startswith('#define DMSH_CHAIN_TOTK '): return line.split('"')[1]
+    raise RuntimeError('DMSH_CHAIN_TOTK not found')
 
 
 def xcode_env():
@@ -76,13 +76,15 @@ def translate(rqs, tree, out, ch):
     return failed
 
 
-def record(out, variant):
+def record(out, request):
     """Add the variant to the Mac cache's index exactly as the runtime does; returns its index row."""
+    variant = request['variant']
     row = {'variant': variant, 'deps': json.loads((out/f'{variant}_b.json').read_text()).get('deps') or {}}
+    if request['stage'] == 'vs':
+        row['depth_minus_w'] = bool(request.get('depth_minus_w', False))
     index = out/f"{variant.split('-')[0]}.variants"
     rows = json.loads(index.read_text()) if index.is_file() else []
-    if not any(r.get('variant') == variant for r in rows):
-        index.write_text(json.dumps(rows + [row], sort_keys=True, separators=(',', ':')))
+    index.write_text(json.dumps([r for r in rows if r.get('variant') != variant] + [row], sort_keys=True, separators=(',', ':')))
     return row
 
 
@@ -98,12 +100,14 @@ def compile_metallib(pack, name, env):
         air.unlink(missing_ok=True)
 
 
-def build_pack(pack, out, variants, ch, env):
+def build_pack(pack, out, requests, ch, env):
     """The pack uses the startup-seed format so the device checks every file before merging it."""
     indexes = {}
-    for variant in variants:
+    variants = [rq['variant'] for rq in requests]
+    for rq in requests:
+        variant = rq['variant']
         for suffix in ('_b.metal', '_b.json'): shutil.copy2(out/f'{variant}{suffix}', pack/f'{variant}{suffix}')
-        indexes.setdefault(variant.split('-')[0], []).append(record(out, variant))
+        indexes.setdefault(variant.split('-')[0], []).append(record(out, rq))
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as pool:
         for problem in pool.map(lambda v: compile_metallib(pack, f'{v}_b', env), variants):
             if problem: print(f'no iOS metallib, the device compiles the source: {problem}')
@@ -148,7 +152,7 @@ def main():
         variants = sorted({rq['variant'] for rq in rqs} - failed)
         if not variants: raise RuntimeError('no variant could be translated')
         name = time.strftime('%Y%m%d-%H%M%S'); pack = work/name; pack.mkdir()
-        count = build_pack(pack, out, variants, ch, env)
+        count = build_pack(pack, out, [rq for rq in rqs if rq['variant'] not in failed], ch, env)
         # What this device needed goes into the one shared list, so every later build carries it (docs/shader-list.md).
         # The pack's index rows are written by build_pack, so the list is merged from the pack after it is built.
         shared = ShaderList.load(SHADER_LIST); before = len(shared.variants); shared.add_cache(pack); shared.save(SHADER_LIST)

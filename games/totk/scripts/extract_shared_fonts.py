@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import struct
+import tempfile
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import modes
 from extract_exefs import decrypt, read_at, require, load_keys, hfs, nca_ctr_key
@@ -75,6 +76,9 @@ def xci_data_ncas(xci, keys):
     return found
 
 
+IVFC_READ_SIZE = 8 * 1024 * 1024
+
+
 def nca_romfs(source, keys, image_path, tickets=None):
     """Write the verified RomFS image of a data NCA (a Path, or a Slice of a game card image) to image_path."""
     with (source if isinstance(source, Slice) else Slice(source)) as f:
@@ -101,19 +105,32 @@ def nca_romfs(source, keys, image_path, tickets=None):
                 iv = fs[0x140:0x148][::-1] + (aligned // 16).to_bytes(8, 'big')
                 return decrypt(ctr_key, modes.CTR(iv), read_at(f, aligned, size + skip))[skip:]
 
-            parent = fs[0xc8:0xe8]
-            image = bytearray()
-            for level, (offset, size, power, reserved) in enumerate(levels):
-                require(12 <= power <= 24 and reserved == 0, 'IVFC block size')
-                block = 1 << power
-                data = read(offset, size)
-                for index, j in enumerate(range(0, len(data), block)):
-                    payload = data[j:j + block]
-                    require(hashlib.sha256(payload + bytes(block - len(payload))).digest() == parent[index * 32:index * 32 + 32], f'IVFC level {level} block {index}')
-                parent = data
-                if level == 5:
-                    image = data
-            image_path.write_bytes(image)
+            # Large DLC images need bounded reads; publish only after every level verifies.
+            with tempfile.TemporaryDirectory(prefix='romfs-', dir=image_path.parent) as tmp:
+                staged = Path(tmp) / 'image.bin'
+                parent = fs[0xc8:0xe8]
+                with staged.open('wb') as image:
+                    for level, (offset, size, power, reserved) in enumerate(levels):
+                        require(12 <= power <= 24 and reserved == 0, 'IVFC block size')
+                        require(level == 5 or size <= 512 * 1024 * 1024, 'IVFC metadata too large')
+                        block = 1 << power
+                        require(len(parent) >= (size + block - 1) // block * 32, 'IVFC parent size')
+                        captured = bytearray() if level < 5 else None
+                        chunk_size = max(IVFC_READ_SIZE, block)
+                        index = 0
+                        for pos in range(0, size, chunk_size):
+                            data = read(offset + pos, min(chunk_size, size - pos))
+                            for j in range(0, len(data), block):
+                                payload = data[j:j + block]
+                                require(hashlib.sha256(payload + bytes(block - len(payload))).digest() == parent[index * 32:index * 32 + 32], f'IVFC level {level} block {index}')
+                                index += 1
+                            if captured is None:
+                                image.write(data)
+                            else:
+                                captured.extend(data)
+                        if captured is not None:
+                            parent = captured
+                staged.replace(image_path)
             return
     raise ValueError(f'No RomFS in the NCA at {f.base:#x}')
 

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'games/totk/scripts'
 sys.path[:0] = [str(ROOT), str(SCRIPTS)]
 import build_app
-from extract_exefs import container_entries, partition_entries, load_keys
+from extract_exefs import container_entries, partition_entries, load_keys, extract_exefs
 from extract_app_icon import control_nca
 from extract_shared_fonts import Slice, nca_romfs, firmware_data_ncas, FONTS
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -47,9 +47,8 @@ def partition(files, hfs=False):
     return (b'HFS0' if hfs else b'PFS0') + struct.pack('<III', len(files), len(strings), 0) + table + strings + payload
 
 
-def romfs():
+def romfs(payload=b'synthetic icon payload'):
     name = b'icon_AmericanEnglish.dat'
-    payload = b'synthetic icon payload'
     dirs = struct.pack('<6I', 0, 0xffffffff, 0xffffffff, 0, 0xffffffff, 0)
     files = struct.pack('<IIQQII', 0, 0xffffffff, 0, len(payload), 0xffffffff, len(name)) + name
     dataoff = 80 + len(dirs) + len(files)
@@ -197,6 +196,45 @@ class Containers(unittest.TestCase):
             game.write_bytes(game_image('nsp', title=title))
             _, result = self.extract(game, success=False)
             self.assertIn('Expected Tears of the Kingdom base game', result.stderr)
+
+    def test_explicit_botw_extraction_preserves_totk_default_and_hash_checks(self):
+        game = self.path / 'botw.nsp'
+        game.write_bytes(game_image('nsp', title=0x01007EF00011E000))
+        _, rejected = self.extract(game, 'totk', success=False)
+        self.assertIn('Expected Tears of the Kingdom', rejected.stderr)
+        out = self.path / 'botw/exefs'
+        manifest = extract_exefs(game, self.keys, out, title_id='01007EF00011E000')
+        self.assertEqual(manifest['program']['title_id'], '01007EF00011E000')
+        self.assertEqual((out / 'main').read_bytes(), b'synthetic main')
+        with self.assertRaisesRegex(ValueError, 'Output already exists'):
+            extract_exefs(game, self.keys, out, title_id='01007EF00011E000')
+        image = bytearray(game.read_bytes())
+        _, entries = container_entries(io.BytesIO(image), len(image))
+        image[entries[0][1] + 0xc00] ^= 1
+        game.write_bytes(image)
+        with self.assertRaisesRegex(ValueError, 'hash-table mismatch'):
+            extract_exefs(game, self.keys, self.path / 'corrupt/exefs', title_id='01007EF00011E000')
+        self.assertFalse((self.path / 'corrupt').exists())
+
+    def test_data_romfs_streams_blocks_and_preserves_output_on_corruption(self):
+        image = romfs(payload=b'DLC fixture' * 5000)
+        source = self.path / 'dlc.nca'
+        with patch(f'{__name__}.romfs', return_value=image):
+            data = nca(content=5, title=0x01007EF00011F001)
+        source.write_bytes(data)
+        output = self.path / 'dlc.romfs'
+        from extract_exefs import read_at
+        with patch('extract_shared_fonts.IVFC_READ_SIZE', 4096), patch('extract_shared_fonts.read_at', wraps=read_at) as reads:
+            nca_romfs(source, load_keys(self.keys), output)
+        self.assertEqual(output.read_bytes(), image)
+        self.assertLessEqual(max(call.args[2] for call in reads.call_args_list), 4096 + 15)
+        corrupt = bytearray(data)
+        corrupt[0xc00 + 5 * 4096 + 100] ^= 1
+        source.write_bytes(corrupt)
+        with self.assertRaisesRegex(ValueError, 'IVFC level 5'):
+            nca_romfs(source, load_keys(self.keys), output)
+        self.assertEqual(output.read_bytes(), image)
+        self.assertFalse(list(self.path.glob('romfs-*')))
 
     def test_update_metadata_with_base_program_id(self):
         for metadata in ([('update.cnmt.nca', nca(title=TITLE + 0x800, content=1))],

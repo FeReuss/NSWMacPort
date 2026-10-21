@@ -62,6 +62,9 @@ typedef struct thr {
     int cur_core;              // virtual core held while running guest code, -1 while blocked / not started
     int preempt;               // a higher-priority thread waits for this thread's core
     uint64_t cseq, core_since; struct thr *cnext;
+    uint64_t svcs, svcs_take;   // every SVC (runtime_core_checkpoint), and the count when the core was taken
+    uint64_t svc_seen, svc_seen_ns;   // svcs as the waiters last saw it change, and when (core_polling)
+    int parked;                // suspended by a forced preemption until core_grant hands it a core in its mask (as Horizon migrates)
     uint32_t wh[4]; int nwh;   // handles of the current WaitSynchronization (state dump)
     int last_hle;              // 1 + wrapper index of the last host call made while "hletrace" was on (state dump)
     uint64_t yrun_ns, yrun_svc;   // the current run of yields: when it started, and nsvc at its last yield (yield_backoff_ns)
@@ -134,21 +137,129 @@ static void core_grant(int c) {   // holding G: give free core c to the best wai
     for (thr_t **p = &g_core_wait; *p; p = &(*p)->cnext)
         if (core_allowed(*p, c) && (!b || (*p)->prio < b->prio || ((*p)->prio == b->prio && (*p)->cseq < b->cseq))) { b = *p; bp = p; }
     if (!b) return;
-    *bp = b->cnext; b->cnext = NULL; b->cur_core = c; b->core_since = now_ns(); g_core_owner[c] = b; pthread_cond_signal(&b->cv);
+    *bp = b->cnext; b->cnext = NULL; b->cur_core = c; b->core_since = now_ns(); b->svcs_take = b->svcs; g_core_owner[c] = b;
+    if (b->parked) { b->parked = 0; thread_resume(b->mport); } else pthread_cond_signal(&b->cv);
+}
+/* Core-stall diagnostics (2026-10-21, BOTW long frames with ~3 busy cores and an idle GPU): the frame log reads the
+   summed / longest core waits per frame, and a wait past CORE_STALL_NS names what each owner of the wanted cores is
+   running at that moment (pc / lr) and how many SVCs it made since taking its core (0 = guest code without a checkpoint). */
+#define CORE_STALL_NS 20000000ull
+static uint64_t g_core_wait_sum, g_core_wait_max, g_core_forced;   // holding G
+void runtime_describe_address(uint64_t a, char *out, size_t n);
+__attribute__((weak)) int runtime_game_spin_note(uint64_t pc, const uint64_t *x, char *out, size_t n) { (void)pc; (void)x; (void)out; (void)n; return 0; }   // game_patches.c
+__attribute__((weak)) int runtime_game_waiter_note(char *out, size_t n) { (void)out; (void)n; return 0; }   // game_patches.c; runs on the waiting thread
+__attribute__((weak)) int runtime_game_spin_lendable(uint64_t pc, const uint64_t *x) { (void)pc; (void)x; return 1; }   // game_patches.c: where a polling owner may lend its core
+void runtime_core_wait_take(uint64_t *sum_ns, uint64_t *max_ns, uint64_t *forced) {
+    pthread_mutex_lock(&G); *sum_ns = g_core_wait_sum; *max_ns = g_core_wait_max; *forced = g_core_forced;
+    g_core_wait_sum = g_core_wait_max = g_core_forced = 0; pthread_mutex_unlock(&G);
+}
+static int core_stall_report(const thr_t *t, uint64_t waited) {   // holding G; 0 when rate-limited
+    /* At most one report per 250 ms (a 6-minute BOTW session had ~3,400 stalls, ~20 MB of log an hour); the frame
+       log's @core_wait_ms still sums every wait, and the next report counts the ones skipped. */
+    static uint64_t last_ns, skipped; uint64_t now = now_ns();
+    if (last_ns && now - last_ns < 250000000ull) { skipped++; return 0; }
+    last_ns = now;
+    char line[1400], where[96], self[48] = ""; runtime_describe_address(t->last_lr, where, sizeof where);   // the guest call that let its core go
+    runtime_game_waiter_note(self, sizeof self);
+    int n = snprintf(line, sizeof line, "[core-stall] h=%#x prio %d mask %#llx waited %.1f ms after svc %#x from %s (+%llu unreported)%s:",
+                     t->handle, t->prio, (unsigned long long)t->mask, waited / 1e6, t->last_svc, where, (unsigned long long)skipped, self);
+    skipped = 0;
+    for (int c = 0; c < NCORE && n < (int)sizeof line - 200; c++) {
+        thr_t *o = g_core_owner[c]; if (!core_allowed(t, c) || !o) continue;
+        char pc[96] = "?", lr[96] = "?"; arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT; int got = 0;
+        if (o->mport && thread_suspend(o->mport) == KERN_SUCCESS) {   // nothing that can allocate while it is stopped
+            got = thread_get_state(o->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS;
+            thread_resume(o->mport);
+        }
+        char spin[160] = "";
+        if (got) { runtime_describe_address(arm_thread_state64_get_pc(st), pc, sizeof pc); runtime_describe_address(arm_thread_state64_get_lr(st), lr, sizeof lr);
+                   runtime_game_spin_note(arm_thread_state64_get_pc(st), st.__x, spin, sizeof spin); }
+        n += snprintf(line + n, sizeof line - n, " core%d h=%#x prio %d held %.1f ms, %llu SVCs, pc %s lr %s%s;", c, o->handle, o->prio,
+                      (now_ns() - o->core_since) / 1e6, (unsigned long long)(o->svcs - o->svcs_take), pc, lr, spin);
+    }
+    LOG("%s", line);
+    return 1;
 }
 static void core_put(thr_t *t) {   // holding G
     if (t->cur_core < 0) return;
     int c = t->cur_core; t->cur_core = -1; t->preempt = 0; g_core_owner[c] = NULL; core_grant(c);
 }
+#ifdef NSW_GAME_BOTW
+/* Horizon preempts a lower-priority thread the moment a higher-priority one wants its core; the checkpoint at the next
+   SVC never comes for BOTW's job workers, which poll their queue in guest code (main+0xef6354: a user-space spinlock, no
+   SVC) while the threads pinned to the same cores at priority 30-32 wait: 236 s of core waits in a 400 s session and
+   50-780 ms frames (2026-10-21). After a slice the waiter stops the lowest-priority owner it may displace, if that owner is
+   in guest code (so it holds no host lock), and takes its core; the owner resumes on the next core its mask allows. */
+#define CORE_SLICE_NS 1000000ull
+/* The first wait before forcing (later retries keep CORE_SLICE_NS, so an owner busy in host I/O is not stopped every
+   100 us). 1 ms is what was measured in play; with it 21% of ordinary frames had their longest core wait at 0.95-1.3 ms
+   (5% without preemption, 2026-10-21). BOTW_CORE_SLICE_US=<us> shortens it for an A/B (Horizon preempts at once). */
+static uint64_t core_first_slice_ns(void) {
+    static int64_t ns = -1;
+    if (ns < 0) { const char *e = getenv("BOTW_CORE_SLICE_US"); ns = e && atoi(e) > 0 && atoi(e) < 1000 ? atoi(e) * 1000ll : (int64_t)CORE_SLICE_NS;
+                  if (ns != (int64_t)CORE_SLICE_NS) LOG("BOTW_CORE_SLICE_US: first core wait %lld us before forced preemption", (long long)(ns / 1000)); }
+    return (uint64_t)ns;
+}
+int runtime_guest_text(uint64_t pc);   // loader.c
+/* On by default for BOTW (2 ms; BOTW_CORE_TIMESLICE_MS=<ms> changes it, 0 turns it off): also displace an owner of equal
+   or higher priority that has run guest code without an SVC for that long, for one burst of the waiter (the new owner gives
+   the core back at its next SVC); game_patches.c limits it to a job worker polling its queue without the lock. Not Horizon
+   semantics: on the console participant 0 reaches the queue sooner. Scripted A/B, 2 x 5 min each (2026-10-21): p99 of the
+   longest core wait per frame 57-64 -> 21 ms, its maximum 416-670 -> 210-243 ms, core waits 726-1222 -> 463-721 ms/s. */
+static uint64_t core_timeslice_ns(void) {
+    static int64_t ns = -1;
+    if (ns < 0) { const char *e = getenv("BOTW_CORE_TIMESLICE_MS"); double ms = e ? atof(e) : 2.0; ns = ms > 0 ? (int64_t)(ms * 1e6) : 0;
+                  if (ns) LOG("BOTW_CORE_TIMESLICE_MS: owners polling %.1f ms without an SVC lend their core", ns / 1e6); }
+    return (uint64_t)ns;
+}
+/* An owner that made no SVC for a whole timeslice, seen by the waiters' 1 ms retries (nothing is timed on the SVC path): a
+   job worker back from a job polls again with SVCs since it took its core (149 of ~210 core-stall owners with the timeslice,
+   2026-10-21). From when it took the core if it made none. */
+static int core_polling(thr_t *x, uint64_t slice, uint64_t now) {   // holding G
+    if (x->svc_seen_ns < x->core_since) { x->svc_seen = x->svcs_take; x->svc_seen_ns = x->core_since; }
+    if (x->svcs != x->svc_seen) { x->svc_seen = x->svcs; x->svc_seen_ns = now; }
+    return now - x->svc_seen_ns >= slice;
+}
+static void core_force(thr_t *t) {   // holding G
+    thr_t *o = NULL; uint64_t slice = core_timeslice_ns(), now = now_ns();
+    for (int c = 0; c < NCORE; c++) {
+        thr_t *x = g_core_owner[c];
+        int spinning = slice && x && core_polling(x, slice, now);
+        if (core_allowed(t, c) && x && (x->prio > t->prio || spinning) && x->mport && (!o || x->prio > o->prio)) o = x;
+    }
+    if (!o || thread_suspend(o->mport) != KERN_SUCCESS) return;
+    arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(o->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) != KERN_SUCCESS || !runtime_guest_text(arm_thread_state64_get_pc(st)) ||
+        (o->prio <= t->prio && !runtime_game_spin_lendable(arm_thread_state64_get_pc(st), st.__x))) {
+        thread_resume(o->mport); return;   // host code reaches its own checkpoint; a lent core only from a lock-free poll
+    }
+    int c = o->cur_core;
+    o->parked = 1; core_put(o);   // the core goes to the best waiter, then o queues for a core again
+    o->cseq = ++g_wseq; o->cnext = g_core_wait; g_core_wait = o; g_core_forced++;
+    if (g_core_owner[c] && g_core_owner[c]->prio > o->prio) g_core_owner[c]->preempt = 1;   // a lent core comes back at the next SVC
+}
+#else
+#define CORE_SLICE_NS CORE_STALL_NS
+static uint64_t core_first_slice_ns(void) { return CORE_STALL_NS; }
+static void core_force(thr_t *t) { (void)t; }
+#endif
 static void core_take(thr_t *t) {   // holding G; waits until a core in t's mask is handed over
     if (!cores_enabled() || t->cur_core >= 0) return;
     if (!(t->mask & ((1u << NCORE) - 1))) die("thread %#x core mask %#llx has no application core", t->handle, (unsigned long long)t->mask);
     int c = t->core >= 0 && t->core < NCORE && core_allowed(t, t->core) && !g_core_owner[t->core] ? t->core : -1;
     for (int i = 0; c < 0 && i < NCORE; i++) if (core_allowed(t, i) && !g_core_owner[i]) c = i;
-    if (c >= 0) { t->cur_core = c; t->core_since = now_ns(); g_core_owner[c] = t; return; }
+    if (c >= 0) { t->cur_core = c; t->core_since = now_ns(); t->svcs_take = t->svcs; g_core_owner[c] = t; return; }
     t->cseq = ++g_wseq; t->cnext = g_core_wait; g_core_wait = t;
     for (int i = 0; i < NCORE; i++) if (core_allowed(t, i) && g_core_owner[i] && g_core_owner[i]->prio > t->prio) g_core_owner[i]->preempt = 1;
-    while (t->cur_core < 0) pthread_cond_wait(&t->cv, &G);
+    uint64_t w0 = now_ns(); int reported = 0, slices = 0;
+    while (t->cur_core < 0) {
+        struct timespec rel = {0, (long)(slices++ ? CORE_SLICE_NS : core_first_slice_ns())};
+        if (pthread_cond_timedwait_relative_np(&t->cv, &G, &rel) != ETIMEDOUT || t->cur_core >= 0) continue;
+        core_force(t);
+        if (!reported && t->cur_core < 0 && now_ns() - w0 >= CORE_STALL_NS) reported = core_stall_report(t, now_ns() - w0) ? 1 : -1;
+    }
+    uint64_t waited = now_ns() - w0; g_core_wait_sum += waited; if (waited > g_core_wait_max) g_core_wait_max = waited;
+    if (reported > 0) LOG("[core-stall] h=%#x got core %d after %.1f ms", t->handle, t->cur_core, waited / 1e6);
 }
 static thr_t *me_or_null(void) { return g_keythr ? pthread_getspecific(g_keythr) : NULL; }
 void runtime_thread_note_hle(unsigned i) { thr_t *t = me_or_null(); if (t) t->last_hle = (int)i + 1; }   // hle_stack.c, while tracing
@@ -164,7 +275,8 @@ void runtime_core_back(int *away) {
 }
 // Preemption point at SVC entry: a higher-priority thread waits for this core.
 void runtime_core_checkpoint(void) {
-    thr_t *t = me_or_null(); if (!t || !t->preempt) return;
+    thr_t *t = me_or_null(); if (!t) return;
+    t->svcs++; if (!t->preempt) return;
     pthread_mutex_lock(&G); t->preempt = 0; core_put(t); core_take(t); pthread_mutex_unlock(&G);
 }
 int runtime_current_core(void) { thr_t *t = me_or_null(); return t ? (t->cur_core >= 0 ? t->cur_core : t->core) : -1; }

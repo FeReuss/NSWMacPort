@@ -4,6 +4,8 @@
 #import <Foundation/Foundation.h>
 #include <sys/clonefile.h>
 #include <unistd.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "dmsh_chain.h"
 
@@ -48,14 +50,28 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         NSDictionary *old = oldData ? [NSJSONSerialization JSONObjectWithData:oldData options:0 error:nil] : nil;
         NSRegularExpression *safe = [NSRegularExpression regularExpressionWithPattern:
             @"^(?:[0-9a-f]{64}\\.variants|[0-9a-f]{64}-[0-9a-f]{12}_b\\.(?:metal|json|metallib)|pso_manifest\\.tsv)$" options:0 error:nil];
-        BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"files_sha256"] isEqual:fingerprint];   // receipts from before 2026-10-18 (manifest_sha256) are checked once more
+        /* The receipt remembers the last few seeds installed into this cache, not only the latest: BOTW's app seed and the
+           complete one build_shaders.py installs used to evict each other, and every start after an offline run checked
+           the app's 78,000 files again (10-30 s, 2026-10-21). Installing only adds files, so an earlier seed whose files
+           all still exist is still installed. */
+        NSArray *recent = [old isKindOfClass:NSDictionary.class] && [old[@"installed"] isKindOfClass:NSArray.class] ? old[@"installed"] : @[];
+        BOOL installed = [old isKindOfClass:NSDictionary.class] && ([old[@"files_sha256"] isEqual:fingerprint] || [recent containsObject:fingerprint]);   // receipts from before 2026-10-18 (manifest_sha256) are checked once more
         for (id name in names) {
             if (![name isKindOfClass:NSString.class] || ![safe numberOfMatchesInString:name options:0 range:NSMakeRange(0, [name length])]) {
                 problem = @"Unsafe startup shader seed filename"; goto fail;
             }
-            if (![fm fileExistsAtPath:[cache stringByAppendingPathComponent:name]]) installed = NO;
         }
-        if (installed) return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
+        if (installed) {   // every file must still exist: 16 parallel stats (BOTW, 95,645 names: 0.07 s warm instead of 0.41 s,
+                           // and a start that waited 6 s on cold metadata, 2026-10-21)
+            __block _Atomic int missing = 0; const char *dir = cache.fileSystemRepresentation; NSUInteger count = names.count;
+            dispatch_apply(16, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
+                char path[PATH_MAX]; struct stat st;
+                for (NSUInteger i = k; i < count && !atomic_load_explicit(&missing, memory_order_relaxed); i += 16)
+                    if (snprintf(path, sizeof path, "%s/%s", dir, [names[i] UTF8String]) >= (int)sizeof path || stat(path, &st))
+                        atomic_store(&missing, 1);
+            });
+            if (!missing) return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
+        }
         // Validate the complete source before changing any existing cache entry.
         NSUInteger checked = 0;
         for (NSString *name in names) {
@@ -108,13 +124,18 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
                     problem = @"Invalid startup shader variant index"; goto fail;
                 }
                 NSMutableArray *merged = user ?: [NSMutableArray array];
-                NSMutableSet *known = [NSMutableSet set];
-                for (id row in merged) if ([row isKindOfClass:NSDictionary.class] && row[@"variant"]) [known addObject:row[@"variant"]];
+                NSMutableDictionary *known = [NSMutableDictionary dictionary];
+                for (NSUInteger i = 0; i < merged.count; i++) {
+                    id row = merged[i];
+                    if ([row isKindOfClass:NSDictionary.class] && row[@"variant"]) known[row[@"variant"]] = @(i);
+                }
                 BOOL changed = !existing;
                 for (id row in seed) {
                     if (![row isKindOfClass:NSDictionary.class] || ![row[@"variant"] isKindOfClass:NSString.class] ||
                         ![row[@"deps"] isKindOfClass:NSDictionary.class]) { problem = @"Invalid prepared shader dependencies"; goto fail; }
-                    if (![known containsObject:row[@"variant"]]) { [merged addObject:row]; [known addObject:row[@"variant"]]; changed = YES; }
+                    NSNumber *at = known[row[@"variant"]];
+                    if (!at) { known[row[@"variant"]] = @(merged.count); [merged addObject:row]; changed = YES; }
+                    else if (![merged[at.unsignedIntegerValue] isEqual:row]) { merged[at.unsignedIntegerValue] = row; changed = YES; }
                 }
                 if (!changed) continue;
                 data = [NSJSONSerialization dataWithJSONObject:merged options:NSJSONWritingSortedKeys error:error];
@@ -123,7 +144,10 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
             if (![data writeToFile:target options:NSDataWritingAtomic error:error]) return nil;
             imported++;
         }
-        NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint} options:0 error:error];
+        NSMutableArray *seeds = [NSMutableArray arrayWithObject:fingerprint];
+        for (id f in [recent arrayByAddingObject:[old isKindOfClass:NSDictionary.class] && old[@"files_sha256"] ? old[@"files_sha256"] : fingerprint])
+            if ([f isKindOfClass:NSString.class] && ![seeds containsObject:f] && seeds.count < 8) [seeds addObject:f];
+        NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint, @"installed": seeds} options:0 error:error];
         if (marker && (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error])) return nil;
         return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(imported)};
     }
@@ -140,7 +164,7 @@ static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError
 // iOS has no translator: ios/tools/fill_shaders.py translates the variants a device missed and pushes them as packs
 // (directories in the seed format) under root. Each pack is checked and merged like the seed, then deleted; a rejected
 // one (an interrupted push) is deleted too, and its variants stay requested until the tool runs again.
-static NSDictionary *totk_fill_import(NSString *root, NSString *cache) {
+static __attribute__((unused)) NSDictionary *totk_fill_import(NSString *root, NSString *cache) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSArray<NSString *> *packs = [[fm contentsOfDirectoryAtPath:root error:nil] ?: @[] sortedArrayUsingSelector:@selector(compare:)];
     NSUInteger merged = 0, imported = 0; NSMutableArray<NSString *> *rejected = [NSMutableArray array];

@@ -18,8 +18,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent/'dev'))
 from game_slot import GameSlot
 
-DATA = Path.home()/'Library/Application Support/MacNativeGames/TOTK'
-LOG = Path.home()/'Library/Logs/MacNativeGames/totk.log'
+DATA = Path(os.environ.get('NSW_GAMES_DIR', Path.home()/'Documents/NSW Games'))/'Tears of the Kingdom'
+LOG = DATA/'Logs/game.log'
 
 
 def startup_facts(text, mode, expected):
@@ -141,7 +141,7 @@ def main():
         raise ValueError('use a new output directory; existing evidence is preserved')
     output.mkdir(parents=True)
     seed = json.loads((app/'Contents/Resources/totk/build/shader-seed/seed-manifest.json').read_text())
-    os.environ['TOTK_GAME_SLOT_DIR'] = str(DATA/'game-slot')
+    os.environ['TOTK_GAME_SLOT_DIR'] = str(DATA.parent/'.runtime/game-slot')
     reports = []
     for name, mode, cache, profile in [
             ('first-empty', 'on', output/'first-cache', output/'first-profile'),

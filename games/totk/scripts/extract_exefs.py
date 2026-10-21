@@ -157,24 +157,27 @@ def nca_inventory(f, entries, keys):
     return records
 
 
-def program_nca(records, update=False):
+def program_nca(records, update=False, *, title_id='0100F2C0115B6000'):
+    """Select one game's program; an explicit title does not imply runtime support."""
+    update_id = f'{int(title_id, 16) + 0x800:016X}'
     if update:
         programs = [(r, h) for r, h in records if r["content_type"] == 0]
         require(len(programs) == 1, "Expected one update Program NCA; combined packages are unsupported")
         record, hdr = programs[0]
-        require(record["title_id"] == "0100F2C0115B6000", "Update belongs to another game")
+        require(record["title_id"] == title_id, "Update belongs to another game")
         require(any(hdr[0x400 + i*512 + 4] == 4 for i in range(4)), "Expected a BKTR update, not a base game")
-        require(all(r["title_id"] in ("0100F2C0115B6000", "0100F2C0115B6800") for r, _ in records), "Mixed-title update package")
+        require(all(r["title_id"] in (title_id, update_id) for r, _ in records), "Mixed-title update package")
         return record, hdr
     # Update Program NCAs can retain the base title ID; their Meta NCA carries the update ID.
     metadata = [r for r, _ in records if r['content_type'] == 1]
-    require(len(metadata) <= 1 and all(r['title_id'] == '0100F2C0115B6000' for r in metadata),
+    require(len(metadata) <= 1 and all(r['title_id'] == title_id for r in metadata),
             'Expected base game metadata; updates, DLC and combined packages are unsupported')
     programs = [(r, h) for r, h in records if r['content_type'] == 0]
     require(len(programs) == 1, 'Expected one base Program NCA; updates, DLC and combined packages are unsupported')
     record, hdr = programs[0]
-    require(record['title_id'] == '0100F2C0115B6000',
-            'Expected Tears of the Kingdom base game 1.0.0; updates, DLC and other games are unsupported')
+    name = 'Tears of the Kingdom base game 1.0.0' if title_id == '0100F2C0115B6000' else f'base game {title_id}'
+    require(record['title_id'] == title_id,
+            f'Expected {name}; updates, DLC and other games are unsupported')
     return record, hdr
 
 
@@ -183,20 +186,15 @@ def record_offset(record):
     return record['nca_offset'] if 'nca_offset' in record else record['xci_offset']
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('game', type=Path, help='base game 1.0.0 (.xci or .nsp)')
-    parser.add_argument('--keys', required=True, type=Path)
-    parser.add_argument('--update', action='store_true', help='extract update code; caller must verify supported version hashes')
-    parser.add_argument('--output', required=True, type=Path)
-    args = parser.parse_args()
-    require(not args.output.exists(), 'Output already exists; choose a new directory')
-    keys = load_keys(args.keys)
-    with args.game.open('rb') as f:
-        kind, entries = container_entries(f, args.game.stat().st_size)
+def extract_exefs(game, keys_path, output, *, title_id='0100F2C0115B6000', update=False):
+    """Extract verified code for analysis; the app builder still validates TOTK hashes."""
+    require(not output.exists(), 'Output already exists; choose a new directory')
+    keys = load_keys(keys_path)
+    with game.open('rb') as f:
+        kind, entries = container_entries(f, game.stat().st_size)
         tickets = common_tickets(f, entries)
         records = nca_inventory(f, entries, keys)
-        record, hdr = program_nca(records, update=args.update)
+        record, hdr = program_nca(records, update=update, title_id=title_id)
         ctr_key = nca_ctr_key(hdr, keys, tickets)
         for i in range(4):
             start, end = struct.unpack_from('<II', hdr, 0x240 + 16 * i)
@@ -230,20 +228,32 @@ def main():
             files = [(name, pfs[off:off + size]) for name, off, size in
                      partition_entries(io.BytesIO(pfs), 0, len(pfs))]
             require(any(name == 'main.npdm' for name, _ in files), 'PFS0 is not ExeFS')
-            args.output.mkdir(parents=True)
+            output.mkdir(parents=True)
             extracted = []
             for name, data in files:
-                (args.output / name).write_bytes(data)
+                (output / name).write_bytes(data)
                 extracted.append({'name': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
-            manifest = {'source': str(args.game.resolve()), 'source_size': args.game.stat().st_size,
-                        'source_mtime_ns': args.game.stat().st_mtime_ns, 'container': kind,
+            manifest = {'source': str(game.resolve()), 'source_size': game.stat().st_size,
+                        'source_mtime_ns': game.stat().st_mtime_ns, 'container': kind,
                         'nca_inventory': [r for r, _ in records], 'program': record, 'section_index': i,
                         'integrity': 'FS header, ExeFS hash table, and every ExeFS data block verified; RSA signatures not checked',
                         'files': extracted}
-            (args.output.parent / 'extraction-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-            print(json.dumps({'integrity': manifest['integrity'], 'files': extracted}, indent=2))
-            return
+            (output.parent / 'extraction-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+            return manifest
         raise ValueError('No ExeFS section found')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('game', type=Path, help='base game 1.0.0 (.xci or .nsp)')
+    parser.add_argument('--keys', required=True, type=Path)
+    parser.add_argument('--title-id', type=lambda value: int(value, 0), default=0x0100F2C0115B6000,
+                        help='program title ID (default: TOTK; decimal or 0x-prefixed hex)')
+    parser.add_argument('--update', action='store_true', help='extract update code; caller must verify supported version hashes')
+    parser.add_argument('--output', required=True, type=Path)
+    args = parser.parse_args()
+    manifest = extract_exefs(args.game, args.keys, args.output, title_id=f'{args.title_id:016X}', update=args.update)
+    print(json.dumps({'integrity': manifest['integrity'], 'files': manifest['files']}, indent=2))
 
 
 if __name__ == '__main__':

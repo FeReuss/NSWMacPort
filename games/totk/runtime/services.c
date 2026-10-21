@@ -1,5 +1,6 @@
 /* Horizon services reached by the current TOTK startup. Unknown operations fail. */
 #include "runtime.h"
+#include "game_version.h"
 #include <TargetConditionals.h>
 #include "ipc.h"
 #include <mach/mach.h>
@@ -207,10 +208,17 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
 }
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
-static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
-static int host_aoc_count(void) { return 0; }
+/* BOTW lists its add-on content and enables the DLC only for exactly two entries including index 1 (main+0x10cc2f8);
+   the build ships the DLC with both packs or not at all (romfs.c: extracted/aoc). */
+int runtime_aoc_available(void);
+static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: %s\n",runtime_aoc_available()?"indices 1 and 2":"no DLC"); }
+static int host_aoc_count(void) { return runtime_aoc_available()?2:0; }
 static int host_aoc_list(int *out,int offset,int count) {
- (void)out;if(offset<0||count<0)runtime_fail("invalid add-on content list range");return 0;
+ if(offset<0||count<0)runtime_fail("invalid add-on content list range");
+ int n=runtime_aoc_available()?2:0,k=0;if(!out||offset>=n)return 0;
+ if(count>n-offset)count=n-offset;dm_guest_write_prepare(out,(size_t)count*sizeof *out);
+ for(;k<count;k++)out[k]=offset+k+1;   /* indices 1, 2 */
+ return k;
 }
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
@@ -327,7 +335,7 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   case 11:arc4random_buf(&value,8);break;
   case 12:value=ASLR_START;break;case 13:value=ASLR_SIZE;break;
   case 14:value=STACK_START;break;case 15:value=STACK_SIZE;break;
-  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=0x0100f2c0115b6000ULL;break;
+  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=NSW_APPLICATION_ID;break;
   case 20:value=(uintptr_t)user_exception_context;break;   /* UserExceptionContextAddress: SDK stores e.g. the dying-message region at +0x1c0 */case 23:value=1;break;
   /* AliasRegionExtraSize (18.0.0+): our alias reservation contains no
    * kernel-owned extension outside the range reported by ids 2 and 3. */

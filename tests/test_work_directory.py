@@ -29,6 +29,8 @@ class WorkDirectoryTests(unittest.TestCase):
                  mock.patch.object(build_app,'run'), \
                  mock.patch.object(build_app,'git_fetch'):
                 tree=build_app.prepare_work(work,Path('/usr/bin/python3'),work/'logs')
+            self.assertEqual(tree, work/'totk.noindex')   # an earlier work/totk is renamed so Spotlight skips it
+            self.assertFalse((work/'totk').exists())
             self.assertFalse((tree/'tooling').is_symlink())
             self.assertTrue((tree/'tooling/spirv-cross').is_symlink())
             self.assertEqual((external/'spirv-cross/keep.txt').read_text(),'shared dependency must survive')

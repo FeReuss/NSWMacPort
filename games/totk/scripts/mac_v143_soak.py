@@ -39,8 +39,9 @@ def main():
     assert not env.get('DM_NVN_TSV'), 'disable per-frame TSV before long sessions'
     commands = root/'input.txt'
     assert Path(env['TOTK_INPUT_FILE']).resolve() == commands
-    slot = Path.home()/'Library/Application Support/MacNativeGames/TOTK/game-slot'
-    log = Path.home()/'Library/Logs/MacNativeGames/totk.log'
+    games = Path(os.environ.get('NSW_GAMES_DIR', Path.home()/'Documents/NSW Games'))
+    slot = games/'.runtime/game-slot'
+    log = games/'Tears of the Kingdom/Logs/game.log'
     identity = log.stat().st_ino
 
     def holder():

@@ -21,7 +21,7 @@ signature, shared fonts by valid BFTTF structure):
      first start does not compile them in the background (games/totk/tools/warm_metal_cache.m)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
-what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
+what is already done and correct. Mac saves, shaders, screenshots and logs go to ~/Documents/NSW Games/<game>; iOS keeps saves
 and the writable shader cache in the app's Documents container.
 
 Needs for Mac: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
@@ -30,7 +30,7 @@ For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and N
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
+import argparse, concurrent.futures, contextlib, fcntl, hashlib, json, os, platform, shutil, signal, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -40,6 +40,7 @@ UPDATED = json.loads((GAME / 'assets/expected-v1.1.2.json').read_text())
 UPDATED121 = json.loads((GAME / 'assets/expected-v1.2.1.json').read_text())
 UPDATED143 = json.loads((GAME / 'assets/expected-v1.4.3.json').read_text())
 VERSIONS = {'v0': EXPECTED, 'v112': UPDATED, 'v121': UPDATED121, 'v143': UPDATED143}
+BOTW_EXPECTED = json.loads((REPO / 'games/botw/assets/expected-v1.9.0.json').read_text())
 UPDATES = ('v112', 'v121', 'v143')
 HACTOOL = ('https://github.com/SciresM/hactool.git', '1d64a83450e025622f3468c28fc4164dad2c5ef6')
 APP_NAME = 'Tears of the Kingdom'
@@ -89,11 +90,30 @@ def run(cmd, log, cwd=None, env=None, quiet=True):
             say(f'   ... still running ({(time.time() - t0) / 60:.0f} min)')
     if quiet:
         threading.Thread(target=beat, daemon=True).start()
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+    old_term = signal.signal(signal.SIGTERM, terminate) if threading.current_thread() is threading.main_thread() else None
+    p = None
     try:
         with open(log, 'w') as f:
-            p = subprocess.run(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT)
+            p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            p.wait()
+    except BaseException:
+        if p is not None and p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait()
+            except ProcessLookupError:
+                p.wait()
+        raise
     finally:
         done.set()
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
     if p.returncode:
         tail = log.read_text(errors='replace').splitlines()[-25:]
         raise BuildError(f'{Path(cmd[1] if Path(cmd[0]).name.startswith("python") else cmd[0]).name} failed (exit {p.returncode}); '
@@ -234,15 +254,27 @@ def link(path, target):
     path.symlink_to(target)
 
 
-def prepare_work(work, py, logs):
-    """work/totk: the game folder of this repository with the generated files inside it (the build scripts write
+def work_tree(work, game):
+    """work/<game>.noindex, the folder of the generated files: Spotlight skips *.noindex folders (app/game_storage.h), and a
+    build writes ~500,000 files here that it would re-index for hours while the game runs. Called under lock_work: a work
+    folder of earlier builds is renamed, keeping its extracted data and caches (the venv is outside it, in work/venv)."""
+    tree = work / f'{game}.noindex'
+    if not tree.exists() and (work / game).is_dir():
+        (work / game).rename(tree)
+    return tree
+
+
+def prepare_work(work, py, logs, *, game="totk"):
+    """work/totk.noindex: the game folder of this repository with the generated files inside it (the build scripts write
     extracted/, rewritten/, build/ and analysis/ next to themselves); its tooling/ points at the fetched sources."""
-    tree = work / 'totk'
+    tree = work_tree(work, game)
     tree.mkdir(parents=True, exist_ok=True)
     # Match both directories AND symlinks to directories. A trailing slash
     # allows rsync -a to copy a tooling symlink from a development checkout.
     excludes = [f'--exclude=/{name}' for name in ('extracted', 'rewritten', 'build', 'analysis', '.venv', 'tooling', 'user-data')]
     run(['rsync', '-a', *excludes, f'{GAME}/', f'{tree}/'], logs / 'sources.log')
+    if game == 'botw':
+        shutil.copy2(REPO / 'games/botw/game_patches.c', tree / 'runtime/game_patches.c')
     tooling = tree / 'tooling'
     # Migrate a work folder made by the old copier before writing child links:
     # link(tooling/spirv-cross, ...) must not traverse into a shared checkout.
@@ -381,9 +413,10 @@ def fonts_valid(folder):
         return False
 
 
-def step_code(tree, game, keys, env, logs, *, version="v0"):
-    expected = VERSIONS[version]
-    update_args = [] if version == "v0" else ["--update"]
+def step_code(tree, game, keys, env, logs, *, version="v0", title="totk"):
+    expected = BOTW_EXPECTED if title == 'botw' else VERSIONS[version]
+    update_args = ["--update"] if title == 'botw' or version != 'v0' else []
+    title_args = ['--title-id', '0x01007ef00011e000'] if title == 'botw' else []
     py = tree / '.venv/bin/python'
     exefs = tree / f'extracted/{version}/exefs'
     want = expected['exefs_sha256']
@@ -393,7 +426,7 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
         if exefs.exists():
             shutil.rmtree(exefs)
         source = prepare_update_container(tree, game, keys, logs) if update_args else game
-        run([py, 'scripts/extract_exefs.py', source, '--keys', keys, '--output', exefs, *update_args], logs / f'extract_exefs-{version}.log', cwd=tree)
+        run([py, 'scripts/extract_exefs.py', source, '--keys', keys, '--output', exefs, *update_args, *title_args], logs / f'extract_exefs-{version}.log', cwd=tree)
     for n, h in want.items():
         if not (exefs / n).is_file():
             raise BuildError(f'ExeFS {n} is missing; not the supported version')
@@ -426,19 +459,8 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
+def step_fonts(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
     py = tree / '.venv/bin/python'
-    romfs = tree / 'extracted/v0/romfs'
-    index = romfs / 'index.json'
-    ok = index.exists() and (romfs / 'romfs.bin').is_file() and json.loads(index.read_text()).get('romfs_sha256') == EXPECTED['romfs']['sha256'] and \
-        (romfs / 'romfs.bin').stat().st_size == EXPECTED['romfs']['size']
-    if not ok:
-        say('2/4 data: extracting and verifying the RomFS (17 GB, a minute or two)')
-        if romfs.exists():
-            shutil.rmtree(romfs)
-        run([py, 'scripts/extract_romfs.py', '--keys', keys], logs / 'extract_romfs.log', cwd=tree)
-        r = json.loads(index.read_text())
-        check('RomFS', r['romfs_sha256'], EXPECTED['romfs']['sha256'])
     fonts = tree / 'extracted/firmware/shared-fonts'
     if not fonts_valid(fonts):
         if shared_fonts:
@@ -462,6 +484,27 @@ def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
             run([py, 'scripts/extract_shared_fonts.py', '--keys', keys, *source_args, '--output', fonts],
                 logs / 'shared_fonts.log', cwd=tree)
         validate_fonts(fonts)
+
+
+def step_romfs(tree, keys, logs):
+    py = tree / '.venv/bin/python'
+    romfs = tree / 'extracted/v0/romfs'
+    index = romfs / 'index.json'
+    ok = index.exists() and (romfs / 'romfs.bin').is_file() and json.loads(index.read_text()).get('romfs_sha256') == EXPECTED['romfs']['sha256'] and \
+        (romfs / 'romfs.bin').stat().st_size == EXPECTED['romfs']['size']
+    if not ok:
+        say('2/4 data: extracting and verifying the RomFS (17 GB, a minute or two)')
+        if romfs.exists():
+            shutil.rmtree(romfs)
+        run([py, 'scripts/extract_romfs.py', '--keys', keys], logs / 'extract_romfs.log', cwd=tree)
+        r = json.loads(index.read_text())
+        check('RomFS', r['romfs_sha256'], EXPECTED['romfs']['sha256'])
+
+
+def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
+    py = tree / ".venv/bin/python"
+    step_romfs(tree, keys, logs)
+    step_fonts(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     if not (tree / 'extracted/v0/romfs-patches/manifest.tsv').exists():
         say('2/4 data: RomFS overlays (quick-menu capture timing, game-over retry)')
         run([py, 'scripts/make_romfs_patches.py'], logs / 'romfs_patches.log', cwd=tree)
@@ -570,8 +613,8 @@ static FILE *mng_open_base(const char *path) {
     return source/'hactool'
 
 
-def step_update_data(tree, game, update, keys, logs, *, version='v112'):
-    expected = VERSIONS[version]
+def step_update_data(tree, game, update, keys, logs, *, version='v112', title='totk'):
+    expected = BOTW_EXPECTED if title == 'botw' else VERSIONS[version]
     folder = tree/f'extracted/{version}/romfs'
     index = folder/'index.json'
     valid = False
@@ -588,10 +631,13 @@ def step_update_data(tree, game, update, keys, logs, *, version='v112'):
             shutil.rmtree(folder)
         say(f'2/4 update: merging base + {expected["display_version"]} and verifying all IVFC levels')
         run([tree/'.venv/bin/python', 'scripts/extract_update_romfs.py', game, update,
-             '--keys', keys, '--hactool', hactool, '--output', folder], logs/'update-romfs.log', cwd=tree)
+             '--keys', keys, '--hactool', hactool, '--output', folder,
+             *(['--title-id', '0x01007ef00011e000'] if title == 'botw' else [])], logs/'update-romfs.log', cwd=tree)
         report = json.loads(index.read_text())
         check(f'{expected["display_version"]} RomFS', report['romfs_sha256'], expected['romfs']['sha256'])
         check(f'{expected["display_version"]} RomFS size', report['romfs_size'], expected['romfs']['size'])
+    if title == 'botw':
+        return
     for script, arguments in [('make_romfs_patches.py', []), ('make_output_res_overlay.py', ['2560x1440'])]:
         run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', version],
             logs/(version+'-'+script+'.log'), cwd=tree)
@@ -612,7 +658,10 @@ def build_spirv_cross(tree, logs):
         logs / 'spirv-cross' / 'link.log', quiet=False)
 
 
-def step_shaders(tree, logs, *, version='v0'):
+def step_shaders(tree, logs, *, version='v0', title='totk', all_variants=False, aoc=None):
+    """Returns the seed folder. BOTW's complete coverage (build_shaders.py) keeps its own folder and receipts, so an app
+    build in between does not replace it and the next complete run resumes instead of translating ~120,000 variants."""
+    seed = tree/'build/shader-seed'/(version + ('-all' if all_variants else ''))
     if not (tree / 'build/spirv-cross/spirv-cross').exists():
         say('3/4 shaders: building SPIRV-Cross with clang')
         build_spirv_cross(tree, logs)
@@ -623,10 +672,13 @@ def step_shaders(tree, logs, *, version='v0'):
         raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
     say('3/4 shaders: discovering and translating startup shaders from your game data')
-    run([tree/'.venv/bin/python', 'scripts/prepare_shader_seed.py',
-         '--romfs', tree/f'extracted/{version}/romfs', '--output', tree/f'build/shader-seed/{version}',
+    run([tree/'.venv/bin/python', 'scripts/prepare_botw_shaders.py' if title == 'botw' else 'scripts/prepare_shader_seed.py',
+         '--romfs', tree/f'extracted/{version}/romfs', '--output', seed,
          '--translator', translator, '--spirv-cross', tree/'build/spirv-cross/spirv-cross',
-         '--version', version, '--modules', tree/f'rewritten/{version}'], logs/'prepare-shader-seed.log', cwd=tree)
+         '--version', version, '--modules', tree/f'rewritten/{version}', *(['--all-variants'] if all_variants else []),
+         *(['--aoc', aoc] if aoc else [])],
+        logs/'prepare-shader-seed.log', cwd=tree)
+    return seed
 
 
 def developer_dirs():
@@ -671,59 +723,213 @@ def metal_compiler():
 METAL_FLAGS = ['-fmetal-math-mode=safe']
 
 
-def step_shader_libs(tree, logs, *, version='v0'):
-    """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch does not follow the
-    app to a folder whose path has another length (step_warm_metal); these files go inside the app. Each is named by the
-    SHA-256 of its source, so the game loads only an exact match, and a rebuild reuses every shader that did not change."""
-    sources = sorted((tree/f'build/shader-seed/{version}').glob('*.metal'))
+def _shader_atomic_write(path, data):
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix=f'.{path.name}.', suffix='.partial', dir=path.parent, delete=False) as out:
+        temporary = Path(out.name)
+        try:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+            out.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _shader_link(library, target):
+    """Publish a verified library under its seed name as a hard link. Content-addressed libraries are only ever replaced
+    by rename, never rewritten in place, so the names cannot diverge; copies of 147,000 libraries cost 1.3 GB and minutes."""
+    temporary = target.with_name(f'.{target.name}.{os.getpid()}.link')
+    temporary.unlink(missing_ok=True)
+    try:
+        os.link(library, temporary)
+        temporary.replace(target)
+    except OSError:   # another volume or a file system without hard links
+        temporary.unlink(missing_ok=True)
+        _shader_atomic_write(target, library.read_bytes())
+
+
+def _shader_metallib_valid(path):
+    try:
+        with path.open('rb') as stream:
+            header = stream.read(24)
+        size = path.stat().st_size
+        return size >= 88 and len(header) == 24 and header[:4] == b'MTLB' and struct.unpack_from('<Q', header, 16)[0] == size
+    except OSError:
+        return False
+
+
+def _shader_library_valid(library, source_digest, compiler):
+    try:
+        record = json.loads(library.with_suffix('.json').read_text())
+        recipe = json.loads(record['compiler'])
+        return (record['source_sha256'] == source_digest and recipe['flags'] == METAL_FLAGS and
+                (compiler is None or record['compiler'] == compiler) and
+                _shader_metallib_valid(library) and record['size'] == library.stat().st_size and
+                record['sha256'] == sha256(library))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def step_shader_libs(tree, logs, *, version='v0', required=False, seed=None):
+    """Resume only verified source/compiler matches; interrupted units never become published libraries."""
+    import signal
+    import tempfile
+    seed = seed or tree/f'build/shader-seed/{version}'
+    sources = sorted(seed.glob('*.metal'))
     found = metal_compiler()
     if not found:
+        if required:
+            raise BuildError('offline shader compilation needs Apple\'s Metal toolchain: xcodebuild -downloadComponent MetalToolchain')
         say('3/4 shaders: no Metal toolchain (xcodebuild -downloadComponent MetalToolchain), so the startup shaders go '
             "into Metal's cache for the app's location at the end of the build instead; moving the app makes them cold again")
-        return
-    metal, compiler, metal_env = found
+    metal, compiler, metal_env = found or (None, None, {})
     libs = tree/'build/shader-libs'
     stamp = libs/'compiler.txt'
-    identity = ' '.join([compiler, *METAL_FLAGS])
-    if stamp.is_file() and stamp.read_text() != identity:
-        shutil.rmtree(libs)
+    identity = (json.dumps({'version': compiler, 'path': str(Path(metal).resolve()), 'sha256': sha256(Path(metal)),
+                            'flags': METAL_FLAGS, 'developer_dir': metal_env.get('DEVELOPER_DIR')}, sort_keys=True)
+                if metal else None)
     libs.mkdir(parents=True, exist_ok=True)
-    stamp.write_text(identity)
-    todo = {}
-    for src in sources:
-        digest = sha256(src)
-        if not (libs/f'{digest}.metallib').is_file():
+    source_digests = [(src, sha256(src)) for src in sources]
+    todo, checked = {}, set()
+    for src, digest in source_digests:
+        if digest in checked:   # BOTW: 147,022 sources share 67,084 libraries; each is checked once
+            continue
+        checked.add(digest)
+        library = libs/f'{digest}.metallib'
+        if not _shader_library_valid(library, digest, identity):
+            # Callers use the final name directly; retain stale bytes outside that public name.
+            if library.is_file():
+                previous = library.with_name(f'{digest}.{sha256(library)}.previous')
+                library.replace(previous)
+                receipt = library.with_suffix('.json')
+                if receipt.is_file():
+                    receipt.replace(Path(str(previous) + '.json'))
             todo.setdefault(digest, src)
     say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders ahead of time')
+    cancelled = threading.Event()
+    processes = set()
+    process_lock = threading.Lock()
 
     def compile_one(item):
         digest, src = item
-        partial = libs/f'{digest}.partial'
-        r = subprocess.run([metal, *METAL_FLAGS, '-o', partial, src], capture_output=True, text=True, env=metal_env)
-        if r.returncode:
+        if metal is None:
+            return f'{src.name}\nMetal toolchain unavailable; compile from source at runtime'
+        descriptor, name = tempfile.mkstemp(prefix=f'.{digest}.', suffix='.partial', dir=libs)
+        os.close(descriptor)
+        partial = Path(name)
+        try:
+            with process_lock:
+                if cancelled.is_set():
+                    return
+                process = subprocess.Popen([metal, *METAL_FLAGS, '-o', partial, src], stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, env=metal_env, start_new_session=True)
+                processes.add(process)
+            try:
+                stdout, stderr = process.communicate()
+            finally:
+                with process_lock:
+                    processes.discard(process)
+            if cancelled.is_set():
+                return
+            if process.returncode or not _shader_metallib_valid(partial) or sha256(src) != digest:
+                return f'{src.name}\n{stdout}{stderr}\ncompiler failed, output incomplete, or source changed'
+            record = {'source_sha256': digest, 'compiler': identity, 'sha256': sha256(partial), 'size': partial.stat().st_size}
+            library = libs/f'{digest}.metallib'
+            with process_lock:
+                if cancelled.is_set():
+                    return
+                partial.replace(library)
+                _shader_atomic_write(library.with_suffix('.json'), (json.dumps(record, sort_keys=True) + '\n').encode())
+        finally:
             partial.unlink(missing_ok=True)
-            return f'{src.name}\n{r.stdout}{r.stderr}'
-        partial.replace(libs/f'{digest}.metallib')
-    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
-        failed = [f for f in pool.map(compile_one, todo.items()) if f]
+
+    def interrupted(number, _frame):
+        if not cancelled.is_set():
+            cancelled.set()
+            raise KeyboardInterrupt(f'Metal compilation interrupted by signal {number}')
+
+    handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGINT, signal.SIGTERM):
+            handlers[number] = signal.signal(number, interrupted)
+    pool = concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4)
+    try:
+        futures = [pool.submit(compile_one, item) for item in todo.items()]
+        failed = [error for future in concurrent.futures.as_completed(futures) if (error := future.result())]
+    except BaseException:
+        cancelled.set()
+        with process_lock:
+            active = list(processes)
+        for process in active:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 1
+        for process in active:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        for number, previous in handlers.items():
+            signal.signal(number, previous)
     log = logs/'shader-libs.log'
     log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text('\n'.join(failed))
+    _shader_atomic_write(log, '\n'.join(sorted(failed)).encode())
     if failed:   # the game compiles these from source at launch, as before
         say(f'   {len(failed)} shaders did not compile ahead of time; they are compiled at launch ({log})')
+    usable = {digest for digest in {d for _src, d in source_digests} if _shader_library_valid(libs/f'{digest}.metallib', digest, identity)}
+    valid = [(src, digest) for src, digest in source_digests if digest in usable]
+    manifest = seed / 'seed-manifest.json'
+    if manifest.is_file():
+        report = json.loads(manifest.read_text())
+        report['metal_compiler'] = identity or 'verified receipts; Metal toolchain unavailable'
+        report['precompiled'] = len(valid)
+        report['compile_failures'] = len(failed)
+        report['files'] = {name: digest for name, digest in report['files'].items() if not name.endswith('.metallib')}
+        library_digests = {}
+        for src, digest in valid:
+            lib = libs/f'{digest}.metallib'
+            target = src.with_suffix('.metallib')
+            library_digest = library_digests.get(digest) or library_digests.setdefault(digest, sha256(lib))
+            # The published link is the library itself (same inode): nothing to read to know its bytes.
+            if not (target.is_file() and (os.path.samefile(target, lib) or sha256(target) == library_digest)):
+                _shader_link(lib, target)
+            report['files'][target.name] = library_digest
+        valid_sources = {src for src, _digest in valid}
+        for src in sources:
+            target = src.with_suffix('.metallib')
+            if src not in valid_sources and target.is_file():
+                target.replace(target.with_name(f'.{target.name}.{sha256(target)}.previous'))
+        _shader_atomic_write(manifest, (json.dumps(report, indent=2) + '\n').encode())
+    if identity is not None:
+        _shader_atomic_write(stamp, identity.encode())
+    if required and not valid:
+        raise BuildError(f'no shader libraries compiled successfully; see {log}')
 
 
-def step_binary(tree, game, keys, env, logs, *, version="v0"):
+
+def step_binary(tree, game, keys, env, logs, *, version="v0", title="totk"):
     say('4/4 app: building the game binary and the launcher')
-    run(['make', f'-j{os.cpu_count() or 4}', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
-    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *([] if version == 'v0' else [f'-DTOTK_GAME_{version.upper()}=1']), 'app/launcher.m', '-framework', 'AppKit',
+    run(['make', f'-j{os.cpu_count() or 4}', 'runtime' if version == 'v0' else f'runtime-{version}', f'GAME={title}'], logs / 'runtime.log', cwd=tree, env=env)
+    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *(['-DNSW_GAME_BOTW=1'] if title == 'botw' else [] if version == 'v0' else [f'-DTOTK_GAME_{version.upper()}=1']), 'app/launcher.m', '-framework', 'AppKit',
          '-o', 'build/app-launcher'], logs / 'launcher.log', cwd=tree, env=env)
     # used only while packaging (step_warm_metal); not part of the app
     run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Wextra', 'tools/warm_metal_cache.m', '-framework', 'Metal',
          '-framework', 'Foundation', '-o', 'build/warm-metal-cache'], logs / 'warm-metal-cache-build.log', cwd=tree, env=env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
-            run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', game, '--keys', keys, '--output', 'build/AppIcon.icns'],
+            run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', game, '--keys', keys, '--output', 'build/AppIcon.icns', *(['--title', '01007EF00011E000'] if title == 'botw' else [])],
                 logs / 'app_icon.log', cwd=tree)
         except BuildError as e:
             say(f'   no app icon, the app gets the default one ({str(e).splitlines()[0]})')
@@ -737,30 +943,44 @@ def clone(src, dst):
 
 
 def copy_tree(src, dst):
-    for p in sorted(src.rglob('*')):
-        if p.is_file():
-            clone(p, dst / p.relative_to(src))
+    """One recursive APFS clone (95,646 seed files: 9 s, where one cp per file took 3.5 min), else a copy per file.
+    -L copies what links point at, as the per-file copy did."""
+    if not src.is_dir():   # an optional input this build does not have
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    if subprocess.run(['cp', '-cRL', f'{src}/.', dst], capture_output=True).returncode:
+        for p in sorted(src.rglob('*')):
+            if p.is_file():
+                clone(p, dst / p.relative_to(src))
 
 
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
     run(['codesign', '--force', '--sign', '-', app], logs / 'sign-app.log')
-    run(['codesign', '--verify', '--deep', '--strict', app], logs / 'verify-app-signature.log')
+    # The seal was just hashed from these same files; re-reading ~16 GB of resources added ~12 s per build. The code
+    # signatures are still verified, and the build runs the bundled executables afterwards.
+    run(['codesign', '--verify', '--deep', '--strict', '--ignore-resources', app], logs / 'verify-app-signature.log')
 
 
-def step_app(tree, out, logs, *, version="v0"):
-    expected = VERSIONS[version]
+def step_app(tree, out, logs, *, version="v0", title="totk", aoc=None):
+    expected = BOTW_EXPECTED if title == 'botw' else VERSIONS[version]
+    app_name = 'Breath of the Wild' if title == 'botw' else APP_NAME
+    bundle_id = 'org.macnativegames.botw' if title == 'botw' else BUNDLE_ID
+    chain = 'botw-native-v1-control-size' if title == 'botw' else 'totk-native-v4-unverified'
+    minimum = 8000
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
         shutil.rmtree(tmp)
-    res = tmp / 'Contents/Resources/totk'
+    res = tmp / f'Contents/Resources/{title}'
     clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
     for rel in ('build/pso_manifest.tsv', 'build/pso_title.tsv', 'build/spirv-cross/spirv-cross',
                 f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
                 f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin'):
         clone(tree / rel, res / rel)
     clone(tree / 'prebuilt/macos-arm64/totk_xlate', res / 'build/shader-service/totk_xlate')   # where totk_shader_rt.m looks for it
+    for name in ('romfs.bin', 'runtime-index.bin') if aoc else ():   # BOTW add-on content, mounted as aoc: (romfs.c)
+        clone(aoc / name, res / 'extracted/aoc' / name)
     for rel in (f'extracted/{version}/romfs-patches', f'extracted/{version}/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         copy_tree(tree / rel, res / rel)
     seed = tree/f'build/shader-seed/{version}'
@@ -768,8 +988,8 @@ def step_app(tree, out, logs, *, version="v0"):
         raise BuildError('startup shader seed was not prepared; refusing an app without first-launch warm-up data')
     try:
         report = json.loads((seed/'seed-manifest.json').read_text())
-        if (report['version'] != version or report['chain'] != 'totk-native-v4-unverified' or
-                report['shaders'] < 8000 or not report['files'] or any(
+        if (report['version'] != version or report['chain'] != chain or
+                report['shaders'] < minimum or not report['files'] or any(
                     Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
             raise ValueError('version, translation chain or file hash differs')
     except (ValueError, KeyError, OSError, TypeError) as error:
@@ -779,9 +999,9 @@ def step_app(tree, out, logs, *, version="v0"):
         lib = tree/f'build/shader-libs/{sha256(src)}.metallib'
         if lib.is_file():
             clone(lib, res/'build/shader-libs'/lib.name)
-    clone(tree / 'build/app-launcher', tmp / 'Contents/MacOS/TOTK')
-    info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable='TOTK', CFBundleIdentifier=BUNDLE_ID, CFBundleName=APP_NAME,
-                CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
+    clone(tree / 'build/app-launcher', tmp / f'Contents/MacOS/{title.upper()}')
+    info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable=title.upper(), CFBundleIdentifier=bundle_id, CFBundleName=app_name,
+                CFBundleDisplayName=app_name, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
                 CFBundleVersion=str(expected['version'] + 1), LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True,
                 LSApplicationCategoryType='public.app-category.action-games', LSSupportsGameMode=True,
                 GCSupportsControllerUserInteraction=True)
@@ -792,8 +1012,10 @@ def step_app(tree, out, logs, *, version="v0"):
     import plistlib
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     (tmp / 'Contents/PkgInfo').write_bytes(b'APPL????')
+    if (tree / 'build/build-manifest.json').is_file():
+        clone(tree / 'build/build-manifest.json', tmp / 'Contents/Resources/build-manifest.json')
     sign_app(tmp, logs)  # A failed seal must not remove the previous working app.
-    old_binary = out/'Contents/Resources/totk/build/totk-native'
+    old_binary = out/f'Contents/Resources/{title}/build/totk-native'
     notified = 0
     while old_binary.is_file():
         # Preparing/signing a replacement is safe while playing; replacing the
@@ -899,14 +1121,18 @@ def step_warm_metal(tree, out, logs):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2, 1.2.1 or 1.4.3 update.',
+    ap = argparse.ArgumentParser(description='Build a native macOS app from your own BOTW 1.9.0 or supported TOTK game files; TOTK also supports iOS.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
+    ap.add_argument('--game', dest='title', choices=('totk', 'botw'), default='totk', help='game to build; BOTW requires its 1.9.0 update')
+    ap.add_argument('--dlc', type=Path, action='append', default=[], help='BOTW: an add-on content NSP; give both packs (the game enables its DLC only with both)')
+    ap.add_argument('--reuse-data', type=Path, help='BOTW: reuse a previously verified runtime RomFS (checks the complete image and file table; executable is rebuilt)')
+    ap.add_argument('--shaders-only', action='store_true', help='prepare and compile shaders into Documents/NSW Games without building or starting the game')
     ap.add_argument('--update', type=Path, help='separate supported cumulative update NSP/NSZ; outputs the same single app')
     ap.add_argument('--platform', choices=('macos','ios'), default='macos', help='build a macOS app (default) or unsigned iPhone/iPad IPA')
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
-    ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    ap.add_argument('--work', type=Path, help='work folder (default: BOTW_build or TOTK_build next to the game file)')
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
     fonts.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory providing the six expected shared fonts (needed for NSP unless --shared-fonts or valid cached fonts are available)')
@@ -914,8 +1140,71 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+_WORK_LOCKS = []
+
+
+def lock_work(work):
+    """One build or build_shaders.py run per work folder, held until the process exits: two at once share the staging
+    folders, receipts and seeds, and a second shader run once replaced files the first was still publishing (2026-10-21)."""
+    work.mkdir(parents=True, exist_ok=True)
+    handle = (work / '.build.lock').open('a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise BuildError(f'another build or build_shaders.py is using {work}; wait for it to finish') from None
+    _WORK_LOCKS.append(handle)
+
+
+@contextlib.contextmanager
+def shader_cache_lock():
+    games = Path(os.environ.get('NSW_GAMES_DIR', Path.home() / 'Documents/NSW Games'))
+    slot = games / '.runtime/game-slot'
+    slot.mkdir(parents=True, exist_ok=True)
+    with (slot / 'lock').open('a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BuildError('close the game before preparing its shader cache') from None
+        running = subprocess.run(['ps', '-axo', 'comm='], capture_output=True, text=True, check=True).stdout.splitlines()
+        if any(Path(name.strip()).name.startswith('totk-native') for name in running):
+            raise BuildError('close the running native game before preparing shaders')
+        yield
+
+
+def install_shader_cache(tree, logs, *, version='v0', title='totk', seed=None):
+    tool = tree / 'build/install-shader-cache'
+    flags = ['-DNSW_GAME_BOTW=1'] if title == 'botw' else [] if version == 'v0' else [f'-DTOTK_GAME_{version.upper()}=1']
+    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Wextra', '-Werror',
+         '-Iapp', '-Iruntime', '-Ithird_party/d2r_gfx/gfx/nvn', *flags,
+         'tools/install_shader_cache.m', '-framework', 'Foundation', '-o', tool], logs / 'shader-cache-installer-build.log', cwd=tree)
+    with shader_cache_lock():
+        run([tool, seed or tree / f'build/shader-seed/{version}'], logs / 'shader-cache-install.log', cwd=tree)
+    report = last_json(logs / 'shader-cache-install.log')
+    if not report or not report.get('available'):
+        raise BuildError('shader-cache installation did not produce a verified report')
+    say(f"Shader cache ready: {report['cache']} ({report['shaders']} variants, {report['precompiled']} precompiled libraries)")
+    return report
+
+
 def main(argv):
     args = parse_args(argv)
+    if args.shaders_only:
+        if args.platform != 'macos':
+            raise BuildError('--shaders-only prepares the macOS cache; use --platform macos')
+        if not metal_compiler():
+            raise BuildError('offline shader compilation needs Apple\'s Metal toolchain: xcodebuild -downloadComponent MetalToolchain')
+    return build_selected(args)
+
+
+def build_selected(args):
+    if args.title == 'botw':
+        from games.botw.build import build_botw
+        return build_botw(args, sys.modules[__name__])
+    if args.reuse_data:
+        raise BuildError('--reuse-data currently applies to BOTW only')
+    if args.dlc:
+        raise BuildError('--dlc currently applies to BOTW only')
     game, keys = args.game.expanduser().resolve(), args.keys.expanduser().resolve()
     if not game.is_file():
         raise BuildError(f'no such file: {game}')
@@ -923,6 +1212,7 @@ def main(argv):
         raise BuildError(f'no such file: {keys}')
     out = (args.out.expanduser().resolve() if args.out else game.parent / (f'{APP_NAME}.ipa' if args.platform=='ios' else f'{APP_NAME}.app'))
     work = (args.work.expanduser().resolve() if args.work else game.parent / 'TOTK_build')
+    lock_work(work)
     if out.suffix.lower() != ('.ipa' if args.platform=='ios' else '.app'):
         raise BuildError(f'the {args.platform} output must end in {".ipa" if args.platform=="ios" else ".app"}: {out}')
     kind = input_kind(game)
@@ -938,7 +1228,7 @@ def main(argv):
         raise BuildError(f'no firmware directory: {firmware}')
     if shared_fonts:
         font_report(shared_fonts)
-    if kind == 'nsp' and not (firmware or shared_fonts or fonts_valid(work / 'totk/extracted/firmware/shared-fonts')):
+    if kind == 'nsp' and not args.shaders_only and not (firmware or shared_fonts or fonts_valid(work_tree(work, 'totk') / 'extracted/firmware/shared-fonts')):
         raise BuildError('NSP files do not include system shared fonts. Supply --firmware <unpacked firmware NCA directory> '
                          'or --shared-fonts <previously extracted font directory>; valid fonts in --work are also reused.')
     py = prerequisites(args)
@@ -951,7 +1241,7 @@ def main(argv):
     free=shutil.disk_usage(work_volume).free/2**30
     output_free=shutil.disk_usage(output_volume).free/2**30
     same_volume=os.stat(work_volume).st_dev==os.stat(output_volume).st_dev
-    base_cached=(work/'totk/extracted/v0/romfs/romfs.bin').exists()
+    base_cached=(work_tree(work, 'totk')/'extracted/v0/romfs/romfs.bin').exists()
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
     if args.platform=='ios':
         if same_volume:
@@ -976,11 +1266,18 @@ def main(argv):
     step_code(tree, game, keys, env, logs)
     if update:
         step_code(tree, update, keys, env, logs, version=version)
-    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
+    if args.shaders_only:
+        step_romfs(tree, keys, logs)
+    else:
+        step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     if update:
         step_update_data(tree, game, update, keys, logs, version=version)
     step_shaders(tree, logs, version=version)
-    step_shader_libs(tree, logs, version=version)
+    step_shader_libs(tree, logs, version=version, required=args.shaders_only)
+    if args.platform == 'macos':
+        install_shader_cache(tree, logs, version=version)
+    if args.shaders_only:
+        return
     step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
     if args.platform=='ios':
