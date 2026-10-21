@@ -1,27 +1,3 @@
-NSWMacPort - Copyright (C) 2026 NSWMacPort contributors
-
-NSWMacPort is a fork of MacNativeGames (https://github.com/ly05010419/MacNativeGames).
-NSWMacPort project additions and the combined work are licensed under GNU GPL
-version 3 only (SPDX-License-Identifier: GPL-3.0-only), with the additional
-term below, as permitted by section 7(b) of that license.
-
-Upstream portions retain their applicable licenses and copyright notices.
-The previous MIT grant remains valid for the portions it covers; its complete
-text is preserved in LICENSE.upstream-MIT. No earlier MIT grant is revoked.
-
-ADDITIONAL TERM (GPLv3 section 7(b): preservation of author attributions)
-
-Anyone who conveys this work, a modified version of it, or a work based on it
-(including forks and projects that use it as their starting point) must
-preserve the attribution notice in the NOTICE file:
-  a) in the conveyed source, as a NOTICE file or an equivalent notice, and
-  b) in the work's main documentation (for example its README), in a place a
-     reader can reasonably find, and
-  c) among the Appropriate Legal Notices the work displays, if it displays any.
-Modified versions may add their own attributions after it, but must not remove
-or alter it. This term adds no other restriction; all other permissions and
-conditions are those of the GNU GPL version 3.
-
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 

@@ -336,7 +336,7 @@ Recorded performance experiments, remaining work and comparison methods: [Mac pe
 
 ## License
 
-Project additions and the combined work use **GPL-3.0-only** with one additional term under GPLv3 section 7(b): forks and derived works must keep the attribution notice in [NOTICE](NOTICE), crediting NSWMacPort and MacNativeGames, in their documentation. See [LICENSE](LICENSE). Distributed derivatives must comply with GPLv3, including its corresponding-source requirements when distributing binaries. Upstream code keeps its applicable license and notices; the complete prior MIT grant is preserved in [LICENSE.upstream-MIT](LICENSE.upstream-MIT) and remains valid for the portions it covers. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This license does not cover Nintendo's game content.
+Project additions and the combined work use **GPL-3.0-only** ([LICENSE](LICENSE)) with one additional term under GPLv3 section 7(b), stated in [NOTICE](NOTICE): forks and derived works must keep its attribution notice, crediting NSWMacPort and MacNativeGames, in their source and documentation. Distributed derivatives must comply with GPLv3, including its corresponding-source requirements when distributing binaries. Upstream code keeps its applicable license and notices; the complete prior MIT grant is preserved in [LICENSE.upstream-MIT](LICENSE.upstream-MIT) and remains valid for the portions it covers. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This license does not cover Nintendo's game content.
 
 ## Export a clean source package
 
