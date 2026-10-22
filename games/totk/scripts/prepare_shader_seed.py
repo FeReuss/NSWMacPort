@@ -43,7 +43,7 @@ LIST = Path(__file__).resolve().parents[1]/'assets/shader_list.tsv'
 GAMES = {
     'totk': dict(folders=None, min_shaders=MIN_SHADERS, list=LIST, all_default=True),
     'botw': dict(folders=('Pack/', 'Effect/', 'Event/', 'System/'), min_shaders=2000,
-                 list=Path(__file__).resolve().parents[2]/'botw/assets/shader_list.tsv', all_default=False),
+                 list=Path(__file__).resolve().parents[2]/'botw/assets/shader_list.tsv', all_default=True),
 }
 DEFAULTS = dict(tex='2d', img={}, attr='float', fout='float')
 

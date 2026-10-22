@@ -142,6 +142,13 @@ class ShaderInventory(unittest.TestCase):
             self.assertEqual(variant, key+'-'+seed.suffix(answers))
         self.assertEqual(seed.suffix(seed.ANSWERS), seed.SUFFIX)
 
+    def test_both_games_translate_every_shader_found_for_the_default_bind_state(self):
+        found = {'a'*64: ('vs', b'', b'', 'Pack/Bootup.pack'), 'b'*64: ('ps', b'', b'', 'Pack/Dungeon000.pack')}
+        for game in ('totk', 'botw'):
+            with self.subTest(game=game):
+                jobs = seed.plan(found, startup={'a'*64}, listed=set(), all_default=seed.GAMES[game]['all_default'])
+                self.assertEqual([(k[0], why) for k, _, _, why in jobs], [('a', 'default'), ('b', 'default')])
+
     def test_located_shaders_are_read_from_the_named_place_and_checked_against_their_key(self):
         control = bytearray(0x880)
         struct.pack_into('<II', control, 0x700, 0x40, 0x100); struct.pack_into('<I', control, 0x714, 1)

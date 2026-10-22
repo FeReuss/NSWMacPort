@@ -40,6 +40,12 @@ bound to depth textures. A shared-list row is translated only when no variant al
 row served by another variant goes into `<seed>.aliases.tsv`, and the packaging renames the warm-up rows through it
 (`shader_list.py rename`), since rows recorded on a player's Mac name the variant translated there.
 
+Breath of the Wild's seed does the same (`all_default`, 2026-10-22). Before, only its boot and title packages' shaders
+had their default variant, so every other shader met in play was translated on the Mac and noted in the contribution
+file. On the NSWMacPort fork, the same 1.9.0 RomFS held 17,683 unique shaders, and the DLC adds none. That fork
+translated all of them for the default bind state at build time, with its own scanner and an older translator.
+`prepare_shader_seed.py` was not run on 1.9.0 or 1.6.0 game files with this change.
+
 Offline check (2026-10-22): of 2,681 variants the game translated on this Mac, the new translator gives identical MSL
 for every one with the same answers, and 2,641 (98.5 %) are served by the default or the depth-bound variant with
 identical MSL.

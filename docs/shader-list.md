@@ -64,7 +64,7 @@ misses one, that variant is not in the list yet, so the game writes it to `shade
 per shader and bind state, nothing else (`third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h`). Since every build carries
 each shader's default variant ([shader-variants.md](shader-variants.md); `all_default` in the seed's manifest), only
 states those variants do not serve are written, never a default variant (`totk_shader_rt.m contrib_wanted`): the list
-keeps non-default variants only (2026-10-22). Breath of the Wild's seed has no such flag yet, so it notes every new one.
+keeps non-default variants only (2026-10-22). Breath of the Wild's seed sets the same flag (also 2026-10-22).
 Render pipelines are collected with them (2026-10-22): one the game builds in play that the app's warm-up lists lack
 becomes an `R` row (and a `B` row with its border recipe), written off the submit thread (`nvn_mtl.m pso_contribute`).
 Its shaders are named as a build names them: a default or depth-bound variant keeps its name, any other is named after
@@ -89,8 +89,9 @@ is fine: rows the list already has are skipped. The game never uploads anything 
 Breath of the Wild has its own list, `games/botw/assets/shader_list.tsv`, in the same format and kept with the same
 tools (`shader_list.py merge ... games/botw/assets/shader_list.tsv <folder or file>`). Its build reads the game's
 Yaz0 packages (`Pack/`, `Effect/`, `Event/`, `System/`: the `uking_*.sbfsha` material archives and the engine's agl
-packages) and translates the boot and title packages' shaders for the default bind state plus every state the list
-names (`games/botw/scripts/prepare_shader_seed.py`). Its players' contribution file is
+packages) and translates every shader it finds there for the default bind state plus every state the list names
+(`games/botw/scripts/prepare_shader_seed.py`; before 2026-10-22, only the boot and title packages' shaders got their
+default state). Its players' contribution file is
 `~/Library/Application Support/MacNativeGames/BotW/shader-list-contribution.txt`, sent with the
 [Breath of the Wild issue form](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list-botw.yml)
 (label `shader-list-botw`; `collect_shader_issues.py --game botw` merges them). The lists never mix: a key names a
