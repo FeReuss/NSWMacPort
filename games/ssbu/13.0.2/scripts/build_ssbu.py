@@ -542,7 +542,7 @@ def main(argv):
     ap.add_argument('--game', type=Path, required=True, help='the 1.0.0 card image (XCI), or the base NSP with --firmware')
     ap.add_argument('--update', type=Path, required=True, help='the 13.0.2 update NSP')
     ap.add_argument('--keys', type=Path, required=True, help='your prod.keys')
-    ap.add_argument('--work', type=Path, default=GAME_DIR / 'SSBU_build', help='work folder (default games/ssbu/SSBU_build)')
+    ap.add_argument('--work', type=Path, default=GAME_DIR / 'SSBU_build', help='work folder (default games/ssbu/13.0.2/SSBU_build)')
     ap.add_argument('--out', type=Path, help='the app to write (default: next to the game file)')
     fonts = ap.add_mutually_exclusive_group()
     fonts.add_argument('--firmware', type=Path, help='an unpacked firmware NCA folder with the six system fonts (needed for an NSP)')

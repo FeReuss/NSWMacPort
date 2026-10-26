@@ -66,7 +66,7 @@ LIST = Path(__file__).resolve().parents[1]/'assets/shader_list.tsv'
 GAMES = {
     'totk': dict(folders=None, min_shaders=MIN_SHADERS, list=LIST, all_default=True),
     'botw': dict(folders=('Pack/', 'Effect/', 'Event/', 'System/'), min_shaders=2000,
-                 list=Path(__file__).resolve().parents[2]/'botw/assets/shader_list.tsv', all_default=False),
+                 list=Path(__file__).resolve().parents[3]/'botw/assets/shader_list.tsv', all_default=False),
     'smo': dict(folders=('ShaderData/', 'EffectData/', 'LayoutData/', 'SystemData/'), min_shaders=5000, list=LIST, all_default=True),
     # 13.0.2: 35,348 shaders in data.arc (27,585 in BNSH files, the rest in SSBH shader files), 3,210 of the 3,212 a
     # session met; the other two are in the game module without a control section beside them (2026-10-24).

@@ -5,10 +5,10 @@
 # build_app.py uses the copy in games/totk/prebuilt/macos-arm64 (made with this script), so building the app needs no
 # .NET at all; run this only after changing the translator, its patches or Service.cs. Needs the .NET 10 SDK and network
 # access the first time (NuGet packages, the NativeAOT compiler).
-# usage: games/ssbu/tools/totk_xlate/publish_native.sh [dotnet]   -> games/ssbu/prebuilt/macos-arm64/totk_xlate (+ .sha256)
+# usage: games/ssbu/13.0.2/tools/totk_xlate/publish_native.sh [dotnet]   -> games/ssbu/13.0.2/prebuilt/macos-arm64/totk_xlate (+ .sha256)
 set -e
 HERE=${0:A:h}
-REPO=${HERE:h:h:h:h}
+REPO=${HERE:h:h:h:h:h}
 DOTNET=${1:-dotnet}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
@@ -19,7 +19,7 @@ for p in "$HERE"/patches/*.patch; do patch -s -d "$WORK/ryujinx-src" -p1 --forwa
 cp "$HERE"/*.cs "$HERE"/totk_xlate.csproj "$WORK/xlate/"
 "$DOTNET" publish "$WORK/xlate/totk_xlate.csproj" -c Release -r osx-arm64 -p:PublishAot=true -p:InvariantGlobalization=true \
   -p:RyuSrc="$WORK/ryujinx-src" -o "$WORK/out"
-OUT=$REPO/games/ssbu/prebuilt/macos-arm64
+OUT=$REPO/games/ssbu/13.0.2/prebuilt/macos-arm64
 mkdir -p "$OUT"
 cp "$WORK/out/totk_xlate" "$OUT/totk_xlate"
 shasum -a 256 "$OUT/totk_xlate" | awk '{print $1}' > "$OUT/totk_xlate.sha256"

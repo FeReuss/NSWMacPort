@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-GAME = Path(__file__).resolve().parents[1]   # games/ssbu
+GAME = Path(__file__).resolve().parents[1]   # games/ssbu/13.0.2
 SCRIPT = GAME/'scripts/gap_report.py'
 spec = importlib.util.spec_from_file_location('gap_report', SCRIPT)
 gap = importlib.util.module_from_spec(spec)

@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-GAME = Path(__file__).resolve().parents[1]   # games/ssbu
+GAME = Path(__file__).resolve().parents[1]   # games/ssbu/13.0.2
 SCRIPTS = GAME/'scripts'
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location('extract_dlc', SCRIPTS/'extract_dlc.py')

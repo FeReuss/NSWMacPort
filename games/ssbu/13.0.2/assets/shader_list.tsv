@@ -1,4 +1,4 @@
-# Super Smash Bros. Ultimate shader list v1 (games/ssbu/scripts/shader_list.py; docs/shader-list.md). The one list for every platform.
+# Super Smash Bros. Ultimate shader list v1 (games/ssbu/13.0.2/scripts/shader_list.py; docs/shader-list.md). The one list for every platform.
 # Identifiers and pipeline descriptors only, no game data. Translation chain totk-native-v7-ssbu-offsets.
 V	0098335df1e447a1c55df5ea64b169d09c3f29841320b9dc43bfb06d9cc1f087	{"attr":{},"fout":{"0":"float"},"img":{},"tex":{"0":"*","4":"*_depth"}}
 V	01e6d4c49ca1885f45ef25a63e87c8b444f34d960bfd846e5a7d805346098c2f	{"attr":{},"fout":{"0":"float"},"img":{},"tex":{"0":"*","4":"*_depth"}}

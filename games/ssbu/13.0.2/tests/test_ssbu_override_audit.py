@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-GAME = Path(__file__).resolve().parents[1]   # games/ssbu
+GAME = Path(__file__).resolve().parents[1]   # games/ssbu/13.0.2
 SCRIPT = GAME/'scripts/override_audit.py'
 spec = importlib.util.spec_from_file_location('override_audit', SCRIPT)
 audit = importlib.util.module_from_spec(spec)

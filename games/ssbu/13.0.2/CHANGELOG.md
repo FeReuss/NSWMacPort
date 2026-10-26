@@ -7,10 +7,10 @@ from, why, and how each step was measured.
 
 ## Where the folder comes from
 
-`games/ssbu` began as a copy of a Super Mario Odyssey 1.4.1 port that is not in this repository (the repository's own
+This folder (`games/ssbu/13.0.2`, `games/ssbu` until the 13.0.5 online port moved in beside it) began as a copy of a Super Mario Odyssey 1.4.1 port that is not in this repository (the repository's own
 Odyssey port is `games/odyssey`). That port was itself a copy of `games/totk` with the SDK 7.3.2 branches Breath of the
 Wild uses. Comments that name Super Mario Odyssey explain why a piece of code exists; the code is this folder's own copy
-and nothing outside `games/ssbu` is read.
+and nothing outside `games/ssbu/13.0.2` is read.
 
 ## Log
 

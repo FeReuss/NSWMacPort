@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from compression import zstd
 
-GAME = Path(__file__).resolve().parents[1]   # games/ssbu
+GAME = Path(__file__).resolve().parents[1]   # games/ssbu/13.0.2
 SCRIPT = GAME/'scripts/prepare_shader_seed.py'
 spec = importlib.util.spec_from_file_location('prepare_shader_seed', SCRIPT)
 seed = importlib.util.module_from_spec(spec)

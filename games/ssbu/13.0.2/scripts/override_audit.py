@@ -346,7 +346,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--only', choices=['MISMATCH', 'CHECK', 'ok'])
     ap.add_argument('--name')
-    ap.add_argument('--runtime', type=Path, default=RUNTIME, help='host sources to read (default games/ssbu/runtime)')
+    ap.add_argument('--runtime', type=Path, default=RUNTIME, help='host sources to read (default games/ssbu/13.0.2/runtime)')
     a = ap.parse_args()
     files = sorted(a.runtime.glob('*.c'))
     sdk = Sdk()

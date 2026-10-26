@@ -46,7 +46,7 @@ HEADERS = {'botw': ('# Breath of the Wild shader list v1 (games/totk/scripts/sha
                     '# Identifiers and pipeline descriptors only, no game data. Translation chain totk-native-v7-unverified.\n'),
            'smo': ('# Super Mario Odyssey shader list v1 (games/smo/scripts/shader_list.py; docs/shader-list.md). The one list for every platform.\n'
                    '# Identifiers and pipeline descriptors only, no game data. Translation chain totk-native-v7-unverified.\n'),
-           'ssbu': ('# Super Smash Bros. Ultimate shader list v1 (games/ssbu/scripts/shader_list.py; docs/shader-list.md). The one list for every platform.\n'
+           'ssbu': ('# Super Smash Bros. Ultimate shader list v1 (games/ssbu/13.0.2/scripts/shader_list.py; docs/shader-list.md). The one list for every platform.\n'
                     '# Identifiers and pipeline descriptors only, no game data. Translation chain totk-native-v7-ssbu-offsets.\n')}
 EXPORT = '# Generated from {} by scripts/shader_list.py; edit that list, not this file.\n'
 KEY = re.compile(r'^[0-9a-f]{64}$')
@@ -100,17 +100,24 @@ def warm_row(fields):
     return None
 
 
-def list_name(path):
-    """How the export names its list: games/<game>/assets/<file> when it is kept there, else the file name."""
+def kept_in(path):
+    """(game, games/<game>/[<version>/]assets/<file>) for a list kept in a game folder, else (None, None)."""
     parts = Path(path).resolve().parts
-    return '/'.join(parts[-4:]) if len(parts) >= 4 and parts[-4] == 'games' and parts[-2] == 'assets' else Path(path).name
+    if len(parts) >= 4 and parts[-2] == 'assets' and 'games' in parts[-5:-3]:
+        start = len(parts) - 5 + parts[-5:-3].index('games')
+        return parts[start + 1], '/'.join(parts[start:])
+    return None, None
+
+
+def list_name(path):
+    """How the export names its list: games/<game>/[<version>/]assets/<file> when it is kept there, else the file name."""
+    return kept_in(path)[1] or Path(path).name
 
 
 def header_for(path):
-    """The list's header comment: by the game folder it is kept in (games/<game>/assets/...), Tears of the Kingdom's otherwise."""
-    parts = Path(path).resolve().parts
-    game = parts[-3] if len(parts) >= 3 and parts[-2] == 'assets' else None
-    return HEADERS.get(game, HEADER)
+    """The list's header comment: by the game folder it is kept in (games/<game>/[<version>/]assets/...), Tears of the
+    Kingdom's otherwise."""
+    return HEADERS.get(kept_in(path)[0], HEADER)
 
 
 class ShaderList:
@@ -195,7 +202,7 @@ class ShaderList:
                 listed = fields[len(row)] if len(fields) > len(row) and fields[len(row)] in ('t', 'm', 'tm') else ''
                 self.add_warm(row, listed or flag)
 
-    def export(self, *flags, source='games/ssbu/assets/shader_list.tsv'):
+    def export(self, *flags, source='games/ssbu/13.0.2/assets/shader_list.tsv'):
         """The warm rows carrying one of these flags; rows of the first flag come first, each row once."""
         out, seen = [], set()
         for flag in flags:
