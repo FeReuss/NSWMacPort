@@ -1,0 +1,512 @@
+{
+  "title_id": "01006A800016E000",
+  "main_build_id": "21450c647b8c5940ed5b68218ea128fd3c5d597d000000000000000000000000",
+  "exefs_sha256": {
+    "main": "eb79e639e47d9a0c79bcfe2ec50fc807afa9601800226627b58bd6a1a83dc52d",
+    "main.npdm": "b5a2e0c5958a86c9fd9e4bd38d0356be4858b4ad007804b9d3bbecc3ef810fb9",
+    "rtld": "bc52eeaae18053433a64caeeed0c12b63fd29fbde635346d732203ec41f585f0",
+    "sdk": "8d20111b4f1dd9a301901ed9c2a0f31ce5678076f7b233bfb8bdbafe52f955f1",
+    "subsdk0": "2ac9587ec0d20a2bda42d7a8f04574f18af3e047d9864a599070d57666b1811e"
+  },
+  "romfs": {
+    "size": 17600939696,
+    "sha256": "33b7554849ed876f8c2b05ad4f2de9b41e77573cfea663f695f55e9589c893bb"
+  },
+  "rewritten_sha256": {
+    "main.patched.bin": "461fe583365e2c2ccbd2d788c89556397a65ee5bf20bc2575d312e3ef75b8899",
+    "sdk.patched.bin": "ce4c8b6251c249e99bc97bab56a65f8901fefb944b3da12e0b045be4c0163924",
+    "subsdk0.patched.bin": "6a88f7246f05ddb1a67cf0f2a82ec988cc0b18db3384a98ed7f643c23261ab57"
+  },
+  "nro": {
+    "lua2cpp_bayonetta": {
+      "sha256": "cfbd10faaed88a6b24d2f787a11f0c97f5bda62d1143076cfdd8088593a79e71",
+      "size": 2424832,
+      "rewritten_sha256": "30497b5803e80f9f73b25e211e141228f60f4cba03aa4916b8ba3c891f96235c"
+    },
+    "lua2cpp_brave": {
+      "sha256": "dc5edcde314f0c461ba0ab08d9e9deef5ede9d5b4ed324141678b9966d43b7a2",
+      "size": 2985984,
+      "rewritten_sha256": "7f0db801751b68e4a4ec207961f5468634013c75af93d4d8337d3891daac8ae6"
+    },
+    "lua2cpp_buddy": {
+      "sha256": "78f4ea82b2d103ba57ed73490cd09123864d0837721696362bfd6655ccfd55ad",
+      "size": 2113536,
+      "rewritten_sha256": "6539247360a01940f1a52982cf6977d65dac468141f66e5e6823b96c939962c3"
+    },
+    "lua2cpp_captain": {
+      "sha256": "d7c3b4b0f857b1bf9048dfcd50b79ce4619356c471ce2476cfe800cd66f17dbd",
+      "size": 1478656,
+      "rewritten_sha256": "7ada490496206525ade729bb0ed00987a220c5da9125186860afb107400a702b"
+    },
+    "lua2cpp_chrom": {
+      "sha256": "0eefe66b23e705225fa7640e1c039fca2c4417dbfd27d2fb3dbcddcd118da956",
+      "size": 1593344,
+      "rewritten_sha256": "44f9f97fe8eed6ad00601cb54e0061f5d4fc6e69283aa403603326cff142e4aa"
+    },
+    "lua2cpp_cloud": {
+      "sha256": "dd65acec463a5b139bf5ed75598066aca0572d7f3f8fe79f156773ed33f2f08b",
+      "size": 2002944,
+      "rewritten_sha256": "7fcaa861babe3ed22cb6c85a25bb978258072d338769c7fc565116d22e7ac1da"
+    },
+    "lua2cpp_common": {
+      "sha256": "43876f961a80e413370629d32c23af9de6e4cc26b448bab88d5433714a566097",
+      "size": 8466432,
+      "rewritten_sha256": "06581ea13b5c2dbcfea66578313510b0422d87429aff90eadf40147c045c3a5a"
+    },
+    "lua2cpp_daisy": {
+      "sha256": "07edaff61d1d609de47e7facede5788d344c770f5f7016e90a162b4d1f1030c3",
+      "size": 1470464,
+      "rewritten_sha256": "fa3c62294a6fc9eba0ab335c557f36097508535e5f6d87be20e267e1df1b9a1b"
+    },
+    "lua2cpp_dedede": {
+      "sha256": "ca9591741d84e073873e21bfcde493a4763ceb8a0c74d42f3a1db69a710d0550",
+      "size": 1835008,
+      "rewritten_sha256": "f546d15114f5883f6ee7062e8c924447a20fa8b132383f6ce7acf48181207b32"
+    },
+    "lua2cpp_demon": {
+      "sha256": "227e0099e1d20ead233cba1aef22021ba38a1aa56dfbfccb3e2e741064988232",
+      "size": 5025792,
+      "rewritten_sha256": "9d7b9efb0c902f56f9a7ea59978789a84c07d4436d860ac1feb3175f7fca6f00"
+    },
+    "lua2cpp_diddy": {
+      "sha256": "a5333c1ee5e72318beeafc511d9bdfcf12e11bf54453a4fd8be05394d29c4a61",
+      "size": 1761280,
+      "rewritten_sha256": "bf3797e51e99433da281be514fcaf78df2bdf6dcb338ad819d266ad2240eafeb"
+    },
+    "lua2cpp_dolly": {
+      "sha256": "c97befff502e660f61399d158e60ec4d19807000ab0eea01ff752cf7a0051f63",
+      "size": 3121152,
+      "rewritten_sha256": "986ee95de23233f68dfa0d9c145ebd00f9f8fb946f855a86f8645cc116990ee8"
+    },
+    "lua2cpp_donkey": {
+      "sha256": "14030b3cfb605cddf114ba5f140dbd554515b7834209e15067a6dd632c9b555b",
+      "size": 1536000,
+      "rewritten_sha256": "4f70bf14206af0724208b8a5916b1a9669dafcd27c7be0af01f94dcf476b81dd"
+    },
+    "lua2cpp_duckhunt": {
+      "sha256": "b2eda6d68ab1d70e465b2e528f72ce94004906709fbbbb03a8a235c26336e9c6",
+      "size": 1523712,
+      "rewritten_sha256": "894547222b06db5f2a40727aceed06f535e2e4965ecd760574d6c13eb4aee9bd"
+    },
+    "lua2cpp_edge": {
+      "sha256": "7110a5ad5dd31e1522ae71331b5ad7961f94a9c228e187de07348b614bbb976e",
+      "size": 3067904,
+      "rewritten_sha256": "7e342bf0927280032211e49298f10ca3a8f21fb31746225e84f428355defc9c7"
+    },
+    "lua2cpp_eflame": {
+      "sha256": "00118129153addc72c32e0441bb963b4b1457df327867d18d0381da47ed2aa70",
+      "size": 5103616,
+      "rewritten_sha256": "0ddb440d67e1225fb5719db206bf37da22503254614994e7accb46945df0e4cf"
+    },
+    "lua2cpp_element": {
+      "sha256": "09043cea6c89e463e986c7cb6936b31d3e2c2607cbc5676550d34db1ccd0dc1c",
+      "size": 143360,
+      "rewritten_sha256": "eefe18de8cbf34dc7791a0f16afcef5703401700a25db90745e4636dcb2b77e8"
+    },
+    "lua2cpp_elight": {
+      "sha256": "7bbeb528a572fbfd40f6ff3546ad8d1e5a24020fc04af955e127c116185aa7a5",
+      "size": 4403200,
+      "rewritten_sha256": "5e8065413802597df014642cd7517876cbcc0d8c679f5d51220a47d98a87deb8"
+    },
+    "lua2cpp_falco": {
+      "sha256": "5778c5e65a503163a47e22e67841f075c2dcf9bdc21da4b034afce9609d40dd4",
+      "size": 1540096,
+      "rewritten_sha256": "78ae6a9120f68953e34fabb8ca9c6b1d8717c4c936bce54ca2253756d70dc65c"
+    },
+    "lua2cpp_fox": {
+      "sha256": "5a1000679890cf87b0b4fbc4eca4d52209a382577b6049e5936a6cfed4c84974",
+      "size": 1454080,
+      "rewritten_sha256": "d931f00fe72cd50c8a88c6cd7c67620d06098a125aa3d75f022125829db70f1c"
+    },
+    "lua2cpp_gamewatch": {
+      "sha256": "7929eeaea7b01d0c587ecabb81473ffee64e7c1f4dfd7d94362447175a0eb3ae",
+      "size": 1417216,
+      "rewritten_sha256": "b473c977806418fc3d940f628f763367440135b74d4e3e74d62912c546702a13"
+    },
+    "lua2cpp_ganon": {
+      "sha256": "4e07b6d5cceb2ab8cbbfc531450775c9dab771d83e810e389c5a04c0cd68f8cf",
+      "size": 1372160,
+      "rewritten_sha256": "029fb3fb0297f8d1143bba9e2a950483b75084787544ccd239f98f83603edc31"
+    },
+    "lua2cpp_gaogaen": {
+      "sha256": "aafea7766e24b0025b15d336e6e65f99342a4398b31d6c2e03507f3d2ca32809",
+      "size": 1662976,
+      "rewritten_sha256": "fc4265aba9a08865596ecf910f6670fea2ebb4c32eb55d5e5d9eb10bd568b880"
+    },
+    "lua2cpp_gekkouga": {
+      "sha256": "c8f8f6e608b56031db8e24a2f1a1862a616b8f9b076675281d7d56d00d39ea4a",
+      "size": 1724416,
+      "rewritten_sha256": "967c6453443acc1046c8faae36d4afb62f0017886b22f51c39e4d78bec3f20e1"
+    },
+    "lua2cpp_ike": {
+      "sha256": "257e941d0ded6ebffd9de6d5986b646b9895e30c9ca496262a13b35c725f5739",
+      "size": 1740800,
+      "rewritten_sha256": "482cb3913f8908709fc96b11b96490e1ab134a7283d6d3e2515c401ffdb63935"
+    },
+    "lua2cpp_inkling": {
+      "sha256": "35f908187869f4e6b5bea3aecaf2475e9ab7946d67f7a80f59cb8d8ad5ebf1a7",
+      "size": 1712128,
+      "rewritten_sha256": "a4580db153ced90302b2ba5d4e7d11b2e49ef764dbf9af1d3d528ad2752c31e3"
+    },
+    "lua2cpp_item": {
+      "sha256": "9ff30a48feee8f4ce67f1f28ce571fea940fb68655ea3bc5389f86415b585c18",
+      "size": 13348864,
+      "rewritten_sha256": "96b5d779752fd35c837cac30eb2ff446c263a5c8b5f94d839a4edace90119c0e"
+    },
+    "lua2cpp_jack": {
+      "sha256": "82d61ea18190a4d5056dffb6440f9391b46200e07580a05d1788ddced80e0a6d",
+      "size": 3985408,
+      "rewritten_sha256": "16e61ab33a714f63d84a54777ee58cbf51ec9d97d1a2c64f5317aac35c20969b"
+    },
+    "lua2cpp_kamui": {
+      "sha256": "fc22ab9628adddbdccf05fa71b68584947ab30a9928e4412d0b4391e1e7a59b5",
+      "size": 1761280,
+      "rewritten_sha256": "ea5e1c7fc48bcc36f3ca092a20df28c4d87f77ae2459d2da137e88602237e786"
+    },
+    "lua2cpp_ken": {
+      "sha256": "b023eb5443fd62d19cd3c83c78a18ffe7ad35b82a5b8ef2cb6c1556a69816147",
+      "size": 1953792,
+      "rewritten_sha256": "2a96295dd30a6d8152df69752d146eae30bb02145c1b56ca15653754f0f63201"
+    },
+    "lua2cpp_kirby": {
+      "sha256": "0d73bec6963f8e49d2008fcbb697dab36012e2536c2817f22ed986c308c69a63",
+      "size": 6950912,
+      "rewritten_sha256": "339a328f2937880bed83ae4575d71bd7510620ae73e6ffeb3ba3f7e005f6ea0c"
+    },
+    "lua2cpp_koopa": {
+      "sha256": "67c96f859633e1a54db5556e7f3d47c096b504a159f2ca0c9d569dea59761132",
+      "size": 1261568,
+      "rewritten_sha256": "081abfd70a0eac4a17bbc0e03870c2b2a3b790af735b42cb0c14c1ddfcc7677a"
+    },
+    "lua2cpp_koopag": {
+      "sha256": "b60d599842836e1199eb7f65e2f174b3b2effd005c64904dce0524ec06a91801",
+      "size": 827392,
+      "rewritten_sha256": "b96a4f90f5aef73ccf3750dcbca0a95fbfdf293bd0304677a73dee266f116670"
+    },
+    "lua2cpp_koopajr": {
+      "sha256": "e920c201d34747de66052764b38038cc565122d4c29e8ab0ba6c7cb88f2b4281",
+      "size": 1527808,
+      "rewritten_sha256": "d9c432db81bbb42f0c8e0c17909d0e2d6e71594e124f320fd8026b2cd4926dd2"
+    },
+    "lua2cpp_krool": {
+      "sha256": "8a56909c64a617cae45cffe9160551f36165cc2c79fe6782ea18b35fb3764c2d",
+      "size": 1576960,
+      "rewritten_sha256": "31942e0444545131d37bb8078cc8743bc7e95f6d241f4860f2de9fb9f229d41e"
+    },
+    "lua2cpp_link": {
+      "sha256": "0cf90c0f1195e240a65b31fd28d1c6b652f64890fd291a28a3010360ec1f0217",
+      "size": 1552384,
+      "rewritten_sha256": "0968f36361bf540ad0360793c30aee81e527c2420f72e94fde5c850eebed5065"
+    },
+    "lua2cpp_littlemac": {
+      "sha256": "277419b92ff0e9094c660d1b9d20a9e5902f39b51a605a4a6bf29f002fb9e59d",
+      "size": 1720320,
+      "rewritten_sha256": "15c6c19553dba40bf10016bfc75a640f10298b5333a39f20490db0ce7ddd9d70"
+    },
+    "lua2cpp_lucario": {
+      "sha256": "355d457dc31927dbd6ada980c08a8207689a285a78ad1451e8cff17c5e2d5293",
+      "size": 1417216,
+      "rewritten_sha256": "615c22cf1627d1c44487afd9ef8b706c47aebad0da87193e57bc5609e9a9bb22"
+    },
+    "lua2cpp_lucas": {
+      "sha256": "4c48cc84780fd175d8c265ea7dd0d2421d8b20998e5d21756e61dca9eba2a99c",
+      "size": 1413120,
+      "rewritten_sha256": "4dd820c36bddb1e9aacba96c5bff98653bfd4ea958c86ceaaa41a44664cff77e"
+    },
+    "lua2cpp_lucina": {
+      "sha256": "8ec6e368169658c0af357828a48cd1e44221df81a88fb199464c4c7d72a9d449",
+      "size": 1654784,
+      "rewritten_sha256": "59252f88e4c7ed3c0af9d4781f893ae9cde9b59c4ea2bf9423940c9f316c8f1f"
+    },
+    "lua2cpp_luigi": {
+      "sha256": "82c5b1e53992883210446135cd9bbbebda027642e274d59a26e6ce166e37b5b0",
+      "size": 1241088,
+      "rewritten_sha256": "2d380e1cdee7735c96fee17f0a9889b7991ea9a2788a6cb528b8dd5ab213b2be"
+    },
+    "lua2cpp_mario": {
+      "sha256": "0b232990e98662a7255ea04950abd4e45a3674fbc88507b045180177a76a251f",
+      "size": 1228800,
+      "rewritten_sha256": "29fd847d4c9b38853431b4326c02910c6541cac8382ee802dd16df30eb8c699c"
+    },
+    "lua2cpp_mariod": {
+      "sha256": "647cc336997b9cbecdf37c402fb9bf84d2f8262147f80bc46ba78967204bf2fb",
+      "size": 1183744,
+      "rewritten_sha256": "302c27e0f16fc872b6429b325acd89e1583aa374655a11e66fa59eb2e4208801"
+    },
+    "lua2cpp_marth": {
+      "sha256": "b0bcb81745cbac22655043d324853e4fefc93001c16cd0777c122abfd3811dc0",
+      "size": 1642496,
+      "rewritten_sha256": "c41ff14bddd5d75ef181bbd7171105f1971dc0b91e08aebfbeacf67d06d93fb0"
+    },
+    "lua2cpp_master": {
+      "sha256": "14eee47a9679a32a97e9e5dce42e861f114813d171db3ac13f679a2ba0e1b028",
+      "size": 4259840,
+      "rewritten_sha256": "f71e268645254db64293ce8bc86d635eaad53475a099e98e0b02aef1fea82762"
+    },
+    "lua2cpp_metaknight": {
+      "sha256": "4d6dfdd2ea6a93f4a968419314b35f825d2ed7f504aa42ae786c127aa8ebb74b",
+      "size": 1613824,
+      "rewritten_sha256": "17fc2c83508520a0fe098efe4642e7fc860afa534ab5bffd9a05a73acb933c39"
+    },
+    "lua2cpp_mewtwo": {
+      "sha256": "8c6ff985a0ea90bd0eddd03293036122c6155bf328f32072c88668968ad9f161",
+      "size": 1273856,
+      "rewritten_sha256": "4ce0327417533c57c0553d63383d0684ef1c6c8a60af5d3009af1b0ca8dc85f1"
+    },
+    "lua2cpp_miienemyf": {
+      "sha256": "ac136bb5526dcaa0cd535f88d2168c37051d0bd1cebfa197bce3f3300a69df91",
+      "size": 512000,
+      "rewritten_sha256": "580559371ae002009cb3936f5d62d1af8802beb031a93414eb18e1d11efd73cc"
+    },
+    "lua2cpp_miienemyg": {
+      "sha256": "10c2aa98a5c8cae59c414f16704eada6a803ae9902e5de7a4da35f8db5786333",
+      "size": 544768,
+      "rewritten_sha256": "0ba9e1978986e88b08de88223feef1e669baae0a6448e037b0a2648f3f6c2d60"
+    },
+    "lua2cpp_miienemys": {
+      "sha256": "34911d6b2684107ee6f8e1c6db85dac97ba07e9d053a719cbdfbe3c2dfb781fc",
+      "size": 540672,
+      "rewritten_sha256": "189160dc7b7274ad7747fe72953bef503cbf53d02408f7bf5441b2863bf05954"
+    },
+    "lua2cpp_miifighter": {
+      "sha256": "3736a24b14a282f50cd4fde951166299c8b0749c7a9baecd457c24925735047d",
+      "size": 2068480,
+      "rewritten_sha256": "d2ba4994adf26c05f1d5ce335b7153bcb146beb373e80bb53068e1019e133b3c"
+    },
+    "lua2cpp_miigunner": {
+      "sha256": "64ec160d90eb97680266710155481c8baab1688ad98e890942be525c2007330c",
+      "size": 1662976,
+      "rewritten_sha256": "1fd6aa7307a24a3de7032f2c1487183c2b908f8d125897b60d52ca4f248b0a9a"
+    },
+    "lua2cpp_miiswordsman": {
+      "sha256": "30aad5f5374b3577b581347323d82f0d82af92b9c58d42b2f4589d932253a127",
+      "size": 2101248,
+      "rewritten_sha256": "dda3174495f0ab28191773a003ebe7d6ddcbca2342616b299d1f218775b80de2"
+    },
+    "lua2cpp_murabito": {
+      "sha256": "b213b885faf8b879d0befa19a670121de86d99a6712afc81e4178444867e5a39",
+      "size": 1732608,
+      "rewritten_sha256": "f32faf2d68811597be99505c531dd515b129ba1b87bcabebe1542e92ad906f75"
+    },
+    "lua2cpp_nana": {
+      "sha256": "22a2103530a3d22adf44ac028f00fd338d7f7a8ba06e0651f9e82754d00c1ec6",
+      "size": 1781760,
+      "rewritten_sha256": "b1948135abfbb819c8468b5218fd037fc043f1dd21d83b6e484278f79df54297"
+    },
+    "lua2cpp_ness": {
+      "sha256": "e675c583178dadc44768194b368db4afb227cf849a8ddb70198140e416533d6a",
+      "size": 1392640,
+      "rewritten_sha256": "b23baf28d86fcd71a8d3324224e2f0a05d62135e4c5e164ae55956981fdf5b39"
+    },
+    "lua2cpp_packun": {
+      "sha256": "fcd569ac8b2b9022438430417015e70b02dbe34b063752a4215c966f831eeca6",
+      "size": 1900544,
+      "rewritten_sha256": "450c6d77b8f95c9564ae438f88f737c9078574f3cdbf6ef080253e91bf35e511"
+    },
+    "lua2cpp_pacman": {
+      "sha256": "e78ef67d0269f85bdbc29168a88669aa2d8631e912704387dcebfa5ef578d095",
+      "size": 1536000,
+      "rewritten_sha256": "0a868aa5e4a6d94e3752102548bfbc8aa1c324409b9e4727fa7e6aafae0cb007"
+    },
+    "lua2cpp_palutena": {
+      "sha256": "489ac493d9aaf0d090593a00d5713406f27eb3b1c8a815a90daa8ad0eb453025",
+      "size": 1302528,
+      "rewritten_sha256": "396228214c4d47ff3c6402025deb0ad34fc22881fe606af919fead430919bd4e"
+    },
+    "lua2cpp_peach": {
+      "sha256": "1e4c02d18d82d2004af1eff91c1b5b1629b225c74b59eac9cfc98c5d37b42cd2",
+      "size": 1495040,
+      "rewritten_sha256": "3f67300410ba0772df628b85282950f31bb954c6a6588117d4a9acd020f40e9a"
+    },
+    "lua2cpp_pfushigisou": {
+      "sha256": "8cdbf76e251da1d753890453dca9aede8c418ecc0e41c556a606659bf3fcac10",
+      "size": 1392640,
+      "rewritten_sha256": "d1abc6cfc520b9b966e3bf995f8d6cf2d5e8af2104eef18aea04f963e0f4e4fd"
+    },
+    "lua2cpp_pichu": {
+      "sha256": "c7fd71013d7257a1d9b7b1fbb261799768444633c715d2b585dede1255c8f80b",
+      "size": 1413120,
+      "rewritten_sha256": "486a06ec828a68a8492283c6d4a5ef191614fb14a5d2562136b5c456025b86a0"
+    },
+    "lua2cpp_pickel": {
+      "sha256": "ac320676c6cb64071dc829086577b7d8a7ff0bdaabd836aa9ca4ab0ce03c61b4",
+      "size": 4616192,
+      "rewritten_sha256": "7d88bea327df56a30cb637510d5b8c9bec1fe6d3fceecd2cb88a5b97b4d624ec"
+    },
+    "lua2cpp_pikachu": {
+      "sha256": "86108704d95ee178b712f5d38172bb9f32b7d0f7bfe4a6c28743f49106ce02e2",
+      "size": 1396736,
+      "rewritten_sha256": "379e544e429d22144296637a1108188abee43dae7914f7d0b4f2bfbd7866cdee"
+    },
+    "lua2cpp_pikmin": {
+      "sha256": "340b7034cae94942c933f471bf845c1b4325f377e7c7e70cdc092e76d6e98199",
+      "size": 1773568,
+      "rewritten_sha256": "9514b70e6904da42cc79aecc31b97db1b7e31e78e98521f7a4ab2569f97103de"
+    },
+    "lua2cpp_pit": {
+      "sha256": "068708ac82ba58a6cfb88d7829daced3482d9480707269289491b016e4f5c798",
+      "size": 1486848,
+      "rewritten_sha256": "64fef594d443bf0074b89fe01fb526820b4dfa4d85b1b88f2a6792f759bff051"
+    },
+    "lua2cpp_pitb": {
+      "sha256": "13872ccc37701c121f1a5559612eee2299a09a7eb363ede07d912a301e75c61a",
+      "size": 1458176,
+      "rewritten_sha256": "9a5e98dded8b447bd61961c166d914946524468b3b6ebcdaf3876a845eb4469f"
+    },
+    "lua2cpp_plizardon": {
+      "sha256": "63d9b0a2b1ad88dc0d311e4e2c6a93ae43a4fc83d657b5c6306ae75598d1038b",
+      "size": 1216512,
+      "rewritten_sha256": "d73139141a3240a8ca84adaf27477ccc7717dff010b9201bcb73735683723a2f"
+    },
+    "lua2cpp_popo": {
+      "sha256": "90dd5143d0af01d6334a4fa2edce1358dccdeeb2f4fa26d727aa092b5c77a27a",
+      "size": 2224128,
+      "rewritten_sha256": "9b4d1dc9e0e5b529624f5d2182ca686cc999b3b3266241e3b5bd869e6931915b"
+    },
+    "lua2cpp_ptrainer": {
+      "sha256": "868419206ae745604c67867c03c516b483fa2fde96749ee243a1aae00b74af4c",
+      "size": 380928,
+      "rewritten_sha256": "2bb3ea4f151331737268846722e2115b5755260eb4a354e3d8e7c603ca23d5db"
+    },
+    "lua2cpp_purin": {
+      "sha256": "1f5aca721f6b34dc6956ab65ac21a67227c4516e87f29782b47d6178d0def2f9",
+      "size": 1343488,
+      "rewritten_sha256": "e126f8c1bfb6b32c1ba38dfc0e9e1e1b2fe4b2bf0b44ade0544c59d405d4babb"
+    },
+    "lua2cpp_pzenigame": {
+      "sha256": "4b6d4a128f7a5f9b6c598917d350d47900a0976664d4720a3611f6de7a2c6119",
+      "size": 1228800,
+      "rewritten_sha256": "f90518ebf35aaca49de63f524a1afd84d256b244a16911498a607d5e650228cf"
+    },
+    "lua2cpp_reflet": {
+      "sha256": "cdb12157f4a425ab68fd31a8ce41f72ebf67055d9cdfe66fd9d3e04609354267",
+      "size": 1736704,
+      "rewritten_sha256": "41fc72201d0ee98f97539db2d87d70e3d2a2733fb18a519f657403e7b465c6bb"
+    },
+    "lua2cpp_richter": {
+      "sha256": "dc875039a7657cc8a36aab627ffe774fd1c174f4de650ddb2532961597165fec",
+      "size": 1515520,
+      "rewritten_sha256": "6c5b4de091429e68e962fe05f01b169650bdc1ae317a5d0ebcd5708ba9d61793"
+    },
+    "lua2cpp_ridley": {
+      "sha256": "41e3e319a6936410e64366534d2676e8fc8f98aa8bd22ec7847c14611f805a11",
+      "size": 1441792,
+      "rewritten_sha256": "2b6e11c72eb2a89a12d1e247c2a0ce9330b47a450d9b59be6c0b04eb3b58fb21"
+    },
+    "lua2cpp_robot": {
+      "sha256": "ad9fe4b53ab58dae468c0f48b5f8ec55f9a1563c39f5061de37ef80d85f1f20d",
+      "size": 1429504,
+      "rewritten_sha256": "3c5d155915e82ce97d04e3d5b11568c64c913c91d0663f8af7a323cb250fcbb0"
+    },
+    "lua2cpp_rockman": {
+      "sha256": "370605171a07bd8f07c0b72a220763a12471914a122b0ae55164aa7e80ca41e2",
+      "size": 1359872,
+      "rewritten_sha256": "29686aa27214a071bc3cf626c4fda468f0fb2a091903a2a5151a961a3e845b9a"
+    },
+    "lua2cpp_rosetta": {
+      "sha256": "2191073176249ba69a68dceebe27f5b0c3736631957e42140c3633f58e672925",
+      "size": 1552384,
+      "rewritten_sha256": "e81896238f074c433e10acd79671c67cdcd49cdcbc450d8a9e75920f6f41d0da"
+    },
+    "lua2cpp_roy": {
+      "sha256": "31c9f7db0a51f682771186dccfe33335ae194639e0f52fc60917b6037b7109f4",
+      "size": 1536000,
+      "rewritten_sha256": "ab01a1cb129078d72f2bffedf16bfaa5c9cb42b10212ccda271b425f9918900c"
+    },
+    "lua2cpp_ryu": {
+      "sha256": "35aa1868313c229aa7244017a4beaeb621da0d02cb9957162bf58e3b8bba7b5b",
+      "size": 2064384,
+      "rewritten_sha256": "b986839fffa501a36f32d57fffec2e55cfbaf161c50d97a67b38926dd37c872f"
+    },
+    "lua2cpp_samus": {
+      "sha256": "6c8139f2821d4d60843d12a02831879475d2054be8b5b253ac9275d4a60fb250",
+      "size": 1490944,
+      "rewritten_sha256": "c870ffac2f02ed33cc3e284b3ad44a592215b6242f0daa8cc9eafdd4846303d8"
+    },
+    "lua2cpp_samusd": {
+      "sha256": "47ba852a8e95e15adb961e11b0be5ec47581a8d523d1a9258a77a6fcd51dcdeb",
+      "size": 1490944,
+      "rewritten_sha256": "f6d209ddf7923cc358136bf3edb3e1466b0b3ecfd46e7fe3e7fa2b52ec6cc49f"
+    },
+    "lua2cpp_sheik": {
+      "sha256": "0cda5a8fc696a1dc6c4db30813ab7f1666fbd258d1d0fbcf7ef6431971207a57",
+      "size": 1810432,
+      "rewritten_sha256": "36ef068e31f801fe0adb2760baaa59670b74cd1c10196148594e765f0116eef1"
+    },
+    "lua2cpp_shizue": {
+      "sha256": "66f2523e29182305492c9103dee40e1333949f33644a248ae865dd38a72e9a87",
+      "size": 1585152,
+      "rewritten_sha256": "206d67d29027282b5d6e5909b702eaf11546fe92d44ceb351f1ed10d5ff2507a"
+    },
+    "lua2cpp_shulk": {
+      "sha256": "4572da9685d38896dcca2aef86f695fd4080f609621dc3844c2f484a056fdee1",
+      "size": 1564672,
+      "rewritten_sha256": "664c7c58e4427cf7191215520d0375d5023964223f4349d56c20d9c63b2b4099"
+    },
+    "lua2cpp_simon": {
+      "sha256": "086a075f00e3e78eea2eef5a6553d3f7d11aa4ffc8fd38c3752bb8a2bf0e9075",
+      "size": 1540096,
+      "rewritten_sha256": "00868cb7c4464ca89db85586d8f6dbd6c974881bbb4b9ecd7d609af3507b46a0"
+    },
+    "lua2cpp_snake": {
+      "sha256": "fca3ed01368e0fb7ce1d2f5a9b9813af61515bc13ceb4e6377c48b85126a400f",
+      "size": 1527808,
+      "rewritten_sha256": "d8209002b22189fee60d0f7b1bceff641d6e06b9a2d37088793b90b9a2392342"
+    },
+    "lua2cpp_sonic": {
+      "sha256": "eb1f04ebd37f921d3bec087e23a46b4548323c582d33e1c9e753a50f8f4612e8",
+      "size": 1609728,
+      "rewritten_sha256": "57f4cc5940cbd6234849788654c3d544d69d6e325d1fecd7915fd03283b3a9a0"
+    },
+    "lua2cpp_szerosuit": {
+      "sha256": "f9365a9f5a3c34250b3a0f1b353d9ba43fe4c9567a8310c1277547fa2be2e340",
+      "size": 1507328,
+      "rewritten_sha256": "19146aa2bc2a3e63c208fd783c21509bc48ab6819f49095e828fcea58a26cf28"
+    },
+    "lua2cpp_tantan": {
+      "sha256": "3566da514639047598ba56fb6b4f89f4cd3f6a1235743b5530993d0a88e562a2",
+      "size": 4861952,
+      "rewritten_sha256": "8becb679de19cc13ca911bbcab8f5c9de7040587e03147340517b034baec849f"
+    },
+    "lua2cpp_toonlink": {
+      "sha256": "6954e41f40ef8b8d903e825abd4b5bf1ca3913627014a780a10767444e0294ab",
+      "size": 1560576,
+      "rewritten_sha256": "3ee31cefa845d5f3219adc0e61574deda7099c6dd0abe535aa5d2afc02efcda0"
+    },
+    "lua2cpp_trail": {
+      "sha256": "ce0ef7f35426d79058018febcb398cd109650058e460f95765d7aa4b95b695a8",
+      "size": 6156288,
+      "rewritten_sha256": "cbd218acb35ff38d1b53b1edaac89a275638529fccaaa6c944e332e0ba11b2af"
+    },
+    "lua2cpp_wario": {
+      "sha256": "1a5bd3358f22ea39853196a099528bcd849d7af120c9dd4ac659b5a773ba9b40",
+      "size": 1409024,
+      "rewritten_sha256": "d96ecf5a206e90e9d3f9ab0c1b0d746f7f3a32dfbe4457b7af60fc52e3efd1d3"
+    },
+    "lua2cpp_wiifit": {
+      "sha256": "54c3e28d0ccd81d5f35122658d258c866d7f74d86e8318e59cdbb446a85e01c7",
+      "size": 1597440,
+      "rewritten_sha256": "85bc8818d3721fc08bf6202c69622712fbd834bdd786657d9857ce527b2434fd"
+    },
+    "lua2cpp_wolf": {
+      "sha256": "738a1c4e9fd32a86128f112eeb3e70ad588f1633241484704a0c134bf87a267a",
+      "size": 1417216,
+      "rewritten_sha256": "bbcc8f2baea6b62c3cee1ba6f19e294f8ef5129b782c6536e8a6d7d3db4bcf13"
+    },
+    "lua2cpp_yoshi": {
+      "sha256": "d02eec0152b9be9f0e8e560946a4632b32e60712fbaaf47c451b811e723f735e",
+      "size": 1404928,
+      "rewritten_sha256": "26a896804bd8bfa5df4cb04b2942e1d759926b7b5f54bb21fbcad47d8d73decf"
+    },
+    "lua2cpp_younglink": {
+      "sha256": "321b26e6080d64082f00ab2d5399d052a11d5c321662959dd039344f5cae64f6",
+      "size": 1515520,
+      "rewritten_sha256": "133a6d93734b0dbe9a243e80ba04cdee30d6634ee8f56aebcdabaf7a82251798"
+    },
+    "lua2cpp_zelda": {
+      "sha256": "40a277f4cfe40f50826f9f3ad19e6a4236b9b952eadc9b68402ee4d2851faff7",
+      "size": 1462272,
+      "rewritten_sha256": "278106a75c578a4cf3d1b38917b4ad31e1560bdb593fe89c036d66a121d08ec1"
+    }
+  }
+}
