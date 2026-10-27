@@ -43,6 +43,7 @@ Tested on Apple silicon with macOS 26, the game played online between players on
 | DLC fighters | from your own DLC NSPs (licences only): "Add DLC…" in the launcher, or drop the files or a folder on the server list |
 | Saves | kept next to the app; the saves of the last five sessions are backed up |
 | Sound and movies | game audio (Opus), VP9 movies |
+| Long sessions | no time limit; long sessions verified by hand on another Mac |
 
 | Pending | Details |
 |---|---|
@@ -50,7 +51,6 @@ Tested on Apple silicon with macOS 26, the game played online between players on
 | Elite Smash | Smash power and Elite matchmaking: not in the server yet |
 | Spectator | needs Elite Smash on the server |
 | Startup shaders | there is no whole-game shader seed yet: shaders are translated while playing, so the first matches stutter |
-| Session limit | sessions stop after 20 minutes by default ("SSBU Data/session-minutes.txt", 0 = none): the renderer has caused GPU driver panics in long sessions, so they stay bounded until longer runs are verified |
 | Local wireless | two instances on one Mac cannot play (Pia's fixed UDP port); two Macs not tested |
 | GameCube controllers | not supported |
 | iPhone / iPad | no build |

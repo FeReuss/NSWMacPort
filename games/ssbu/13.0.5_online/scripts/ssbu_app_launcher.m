@@ -4,8 +4,7 @@
    list), so the app keeps working when the project checkout is not there. Contents/MacOS/ssbu-native is a symlink to the
    bundled runtime: started through it, the window belongs to this app (name and icon), while the runtime still finds its
    shader tools next to the real file. The game runs as the user's (TOTK_SLOT_OWNER=user), so it takes the one-game slot
-   ahead of test runs. "SSBU Data/session-minutes.txt" sets a session limit (default 20, 0 = none): the copied renderer
-   has caused GPU driver panics in long sessions, so sessions stay bounded until longer runs are verified.
+   ahead of test runs. Sessions have no time limit.
 
    Every launch first shows a menu (ServerPicker): play offline, or pick an ssbu-oof server (ssbu-oof docs/STANDARD.md
    sections 1-2; add, edit, delete), sign in or create an account on it, then Start Game, Friends and Requests.
@@ -22,7 +21,6 @@
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,9 +63,6 @@ static void back_up_saves(const char *profile, const char *data, const char *sta
         if (i >= 5) { char old[PATH_MAX]; join(old, backups, names[i]); run((const char *const[]){"/bin/rm", "-rf", old, NULL}); }
         free(names[i]);
     }
-}
-static void append(const char *path, const char *line) {
-    FILE *f = fopen(path, "a"); if (f) { fputs(line, f); fclose(f); }
 }
 
 /* ---------- server list ---------- */
@@ -751,10 +746,10 @@ int main(void) {
     join(runtime, macos, "ssbu-native"); join(modules, game, "rewritten/local");
     join(romfs, game, "romfs"); join(fonts, game, "fonts");
 
-    char data[PATH_MAX], profile[PATH_MAX], cache[PATH_MAX], commands[PATH_MAX], log[PATH_MAX], minutes_path[PATH_MAX], servers[PATH_MAX];
+    char data[PATH_MAX], profile[PATH_MAX], cache[PATH_MAX], commands[PATH_MAX], log[PATH_MAX], servers[PATH_MAX];
     join(data, home, "SSBU Data"); join(profile, data, "profile");
     join(cache, data, "shader-cache/" SHADER_CHAIN);
-    join(commands, data, "commands.txt"); join(log, data, "last-run.log"); join(minutes_path, data, "session-minutes.txt");
+    join(commands, data, "commands.txt"); join(log, data, "last-run.log");
     join(servers, data, "servers.json");
     char dlc_path[PATH_MAX]; join(dlc_path, data, "dlc.json");
     mkdir(data, 0755); mkdir(profile, 0700);
@@ -799,10 +794,6 @@ int main(void) {
     struct stat st;
     if (!*slot || stat(slot, &st) || !S_ISDIR(st.st_mode)) { join(slot, data, "game-slot"); mkdir(slot, 0755); }
 
-    double minutes = 20;
-    FILE *mf = fopen(minutes_path, "r");
-    if (mf) { if (fscanf(mf, "%lf", &minutes) != 1 || minutes < 0) minutes = 20; fclose(mf); }
-
     FILE *cf = fopen(commands, "w"); if (cf) fclose(cf);
     setenv("TOTK_GPU_ALLOW_SUBMIT", "1", 1); setenv("TOTK_GPU_MIDCLEAR", "1", 1);
     setenv("TOTK_PROFILE_DIR", profile, 1); setenv("TOTK_SHADER_CACHE", cache, 1);
@@ -826,27 +817,12 @@ int main(void) {
         execl(runtime, "ssbu-native", modules, "boot", (char *)NULL);
         perror("SSBU: could not start the game"); _exit(127);
     }
-    time_t start = time(NULL), asked = 0;
-    for (;;) {
-        int status; pid_t r = waitpid(child, &status, WNOHANG);
-        if (r == child) {
-            int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-            if (code && !asked) {   /* a crash, not the session limit: keep its log apart from the next session's */
-                char crash[PATH_MAX], name[64]; snprintf(name, sizeof name, "crash-%s.log", stamp);
-                join(crash, data, name); rename(log, crash);
-            }
-            return code;
-        }
-        if (r < 0 && errno != EINTR) return 1;
-        time_t now = time(NULL);
-        if (minutes > 0 && !asked && difftime(now, start) >= minutes * 60) {
-            char note[160]; snprintf(note, sizeof note, "[SSBU.app] %g-minute session limit: closing the game\n", minutes);
-            append(log, note); append(commands, "close\n"); asked = now;
-        }
-        /* The game finishes a save in progress before quitting (up to 15 s, frontend.m windowWillClose); only a game
-           that has not quit well after that is stopped. */
-        if (asked && difftime(now, asked) >= 45) kill(child, SIGTERM);
-        if (asked && difftime(now, asked) >= 60) kill(child, SIGKILL);
-        sleep(1);
+    int status;
+    while (waitpid(child, &status, 0) < 0) if (errno != EINTR) return 1;
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    if (code) {   /* a crash: keep its log apart from the next session's */
+        char crash[PATH_MAX], name[64]; snprintf(name, sizeof name, "crash-%s.log", stamp);
+        join(crash, data, name); rename(log, crash);
     }
+    return code;
 }

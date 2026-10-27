@@ -53,9 +53,6 @@ def seed_data():
         cache.parent.mkdir(exist_ok=True)
         subprocess.run(["cp", "-cR", str(BUILD / "build/shader-cache" / CHAIN), str(cache)], check=True)
         print("Seeded the shader cache.")
-    minutes = DATA / "session-minutes.txt"
-    if not minutes.exists():
-        minutes.write_text("20\n")
 
 
 def main():

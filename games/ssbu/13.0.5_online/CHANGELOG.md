@@ -44,6 +44,9 @@ tools and where they came from: [third_party/COPIES.md](third_party/COPIES.md).
 - **Labo VR** stopped on `nn::pctl::CheckStereoVisionPermission`; it is answered from the local stereo restriction.
 - **Rumble** went to one controller: each player and motor is its own channel now.
 - **Launcher screens** use the window's height: lists and tabs grow with it, screens without a list are centred.
+- **Session limit removed:** the launcher copied from Odyssey closed the game after 20 minutes
+  ("SSBU Data/session-minutes.txt"), a guard against GPU driver panics in that renderer's long runs. Long sessions were
+  verified by hand on another Mac, so the launcher now waits for the game with no time limit and ignores that file.
 
 ## Testing several instances on one Mac
 
